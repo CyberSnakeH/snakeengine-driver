@@ -1,0 +1,37 @@
+# SELinux File Contexts for SnakeEngine
+#
+# Installation:
+#   semanage fcontext -a -t snakeengine_exec_t "/usr/local/bin/snakeengine"
+#   restorecon -Rv /usr/local/bin/snakeengine
+#
+# View contexts:
+#   ls -Z /dev/snakedrv
+#   ls -Z /usr/local/bin/snakeengine
+
+# Executables
+/usr/local/bin/snakeengine                  --  gen_context(system_u:object_r:snakeengine_exec_t,s0)
+/usr/local/bin/snakeengine-gui              --  gen_context(system_u:object_r:snakeengine_exec_t,s0)
+
+# Libraries
+/usr/local/lib/snakeengine(/.*)?                gen_context(system_u:object_r:lib_t,s0)
+
+# Device node
+/dev/snakedrv                               --  gen_context(system_u:object_r:snakedrv_device_t,s0)
+
+# Kernel module
+/lib/modules/[^/]+/extra/snakedrv\.ko       --  gen_context(system_u:object_r:snakedrv_ko_t,s0)
+/lib/modules/[^/]+/updates/snakedrv\.ko     --  gen_context(system_u:object_r:snakedrv_ko_t,s0)
+
+# Configuration files
+/etc/snakeengine(/.*)?                          gen_context(system_u:object_r:snakeengine_conf_t,s0)
+
+# Runtime files
+/run/snakeengine(/.*)?                          gen_context(system_u:object_r:snakeengine_var_run_t,s0)
+/var/run/snakeengine(/.*)?                      gen_context(system_u:object_r:snakeengine_var_run_t,s0)
+
+# Log files
+/var/log/snakeengine(/.*)?                      gen_context(system_u:object_r:snakeengine_log_t,s0)
+
+# udev rules
+/etc/udev/rules\.d/99-snakedrv\.rules       --  gen_context(system_u:object_r:snakedrv_udev_rules_t,s0)
+/lib/udev/rules\.d/99-snakedrv\.rules       --  gen_context(system_u:object_r:snakedrv_udev_rules_t,s0)

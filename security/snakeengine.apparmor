@@ -1,0 +1,111 @@
+# AppArmor profile for SnakeEngine
+#
+# Installation:
+#   sudo cp snakeengine.apparmor /etc/apparmor.d/snakeengine
+#   sudo apparmor_parser -r /etc/apparmor.d/snakeengine
+#
+# To put in complain mode (logging only):
+#   sudo aa-complain /etc/apparmor.d/snakeengine
+#
+# To enforce:
+#   sudo aa-enforce /etc/apparmor.d/snakeengine
+
+#include <tunables/global>
+
+profile snakeengine /usr/local/bin/snakeengine flags=(attach_disconnected) {
+    #include <abstractions/base>
+    #include <abstractions/nameservice>
+    
+    # Allow reading own executable and libraries
+    /usr/local/bin/snakeengine mr,
+    /usr/local/lib/snakeengine/** mr,
+    
+    # Allow access to the kernel driver
+    /dev/snakedrv rw,
+    
+    # Capabilities required for memory access and debugging
+    capability sys_ptrace,
+    capability sys_admin,
+    capability dac_read_search,
+    capability dac_override,
+    
+    # Allow reading /proc for process information
+    /proc/ r,
+    /proc/[0-9]*/maps r,
+    /proc/[0-9]*/mem rw,
+    /proc/[0-9]*/status r,
+    /proc/[0-9]*/cmdline r,
+    /proc/[0-9]*/exe r,
+    /proc/[0-9]*/task/ r,
+    /proc/[0-9]*/task/[0-9]*/ r,
+    /proc/[0-9]*/task/[0-9]*/status r,
+    /proc/sys/kernel/yama/ptrace_scope r,
+    
+    # Allow ptrace for debugging
+    ptrace (read, trace) peer=*,
+    
+    # Allow signals for process control
+    signal (send, receive) peer=*,
+    
+    # Configuration files
+    /etc/snakeengine/** r,
+    owner @{HOME}/.config/snakeengine/** rw,
+    
+    # Temporary files
+    owner /tmp/snakeengine-* rw,
+    owner /run/snakeengine/** rw,
+    
+    # Network access for UI (if needed)
+    # Uncomment if using remote UI
+    # network inet stream,
+    # network inet6 stream,
+    
+    # X11/Wayland for GUI
+    #include <abstractions/X>
+    #include <abstractions/wayland>
+    
+    # OpenGL for rendering
+    /dev/dri/** rw,
+    /sys/devices/pci**/** r,
+    
+    # SDL2 and input devices
+    /dev/input/** r,
+    
+    # Font access
+    #include <abstractions/fonts>
+    
+    # Deny network access (security hardening)
+    # Remove this if network features are needed
+    deny network inet,
+    deny network inet6,
+    
+    # Deny write to sensitive locations
+    deny /boot/** w,
+    deny /lib/modules/** w,
+    deny /usr/lib/** w,
+    deny /etc/** w,
+    
+    # Deny loading other kernel modules
+    deny /sbin/insmod x,
+    deny /sbin/modprobe x,
+}
+
+# Profile for the GUI frontend
+profile snakeengine-gui /usr/local/bin/snakeengine-gui flags=(attach_disconnected) {
+    #include <abstractions/base>
+    #include <abstractions/gnome>
+    #include <abstractions/fonts>
+    #include <abstractions/X>
+    #include <abstractions/wayland>
+    
+    # Allow communication with main process
+    signal (send, receive) peer=snakeengine,
+    
+    # GUI resources
+    /usr/share/snakeengine/** r,
+    owner @{HOME}/.config/snakeengine/** rw,
+    
+    # Deny ptrace (GUI doesn't need it)
+    deny capability sys_ptrace,
+    deny capability sys_admin,
+}

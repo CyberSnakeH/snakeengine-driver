@@ -1,0 +1,160 @@
+# SELinux Type Enforcement Policy for SnakeEngine
+#
+# Compilation:
+#   checkmodule -M -m -o snakeengine.mod snakeengine.te
+#   semodule_package -o snakeengine.pp -m snakeengine.mod -f snakeengine.fc
+#   semodule -i snakeengine.pp
+#
+# Troubleshooting:
+#   # Check for denials
+#   ausearch -m avc -ts recent
+#   
+#   # Generate policy from denials
+#   audit2allow -a -M snakeengine_local
+#
+# Removal:
+#   semodule -r snakeengine
+
+policy_module(snakeengine, 1.0.0)
+
+########################################
+# Type definitions
+########################################
+
+# Executable types
+type snakeengine_t;
+type snakeengine_exec_t;
+
+# Device type for /dev/snakedrv
+type snakedrv_device_t;
+
+# Config file type
+type snakeengine_conf_t;
+
+# Runtime data type
+type snakeengine_var_run_t;
+
+# Log file type
+type snakeengine_log_t;
+
+########################################
+# Role and domain transitions
+########################################
+
+# Allow transition from user domain (explicit domtrans below)
+role system_r types snakeengine_t;
+
+gen_require(`
+    type unconfined_t;
+    type udev_t;
+    type proc_t;
+    attribute file_type;
+    attribute domain;
+')
+
+# Transition to snakeengine_t when executing snakeengine_exec_t
+domtrans_pattern(unconfined_t, snakeengine_exec_t, snakeengine_t)
+
+########################################
+# snakeengine_t domain permissions
+########################################
+
+# Basic process permissions
+allow snakeengine_t self:process { signal sigkill sigstop signull };
+allow snakeengine_t self:fifo_file rw_fifo_file_perms;
+allow snakeengine_t self:unix_stream_socket create_stream_socket_perms;
+
+# Device access for /dev/snakedrv
+allow snakeengine_t snakedrv_device_t:chr_file { open read write ioctl };
+
+# Capability permissions required for debugging
+allow snakeengine_t self:capability { sys_ptrace sys_admin dac_read_search dac_override };
+
+# ptrace permissions for debugging other processes
+allow snakeengine_t domain:process ptrace;
+
+# Read /proc for process information
+read_files_pattern(snakeengine_t, proc_t, proc_t)
+list_dirs_pattern(snakeengine_t, proc_t, proc_t)
+
+# Access /proc/[pid]/mem for memory operations
+allow snakeengine_t domain:file { read write };
+
+# Read /proc/[pid]/maps, status, etc.
+allow snakeengine_t domain:dir list_dir_perms;
+allow snakeengine_t domain:lnk_file read_lnk_file_perms;
+
+# Signal handling for process control
+allow snakeengine_t domain:process { signal sigkill sigstop };
+
+# Configuration files
+read_files_pattern(snakeengine_t, snakeengine_conf_t, snakeengine_conf_t)
+
+# Runtime files (var/run)
+manage_files_pattern(snakeengine_t, snakeengine_var_run_t, snakeengine_var_run_t)
+manage_dirs_pattern(snakeengine_t, snakeengine_var_run_t, snakeengine_var_run_t)
+# files_pid_filetrans not available on some policy versions; fallback to generic
+allow snakeengine_t snakeengine_var_run_t:dir create_dir_perms;
+allow snakeengine_t snakeengine_var_run_t:file create_file_perms;
+
+# Logging (without logging_log_filetrans for compatibility)
+append_files_pattern(snakeengine_t, snakeengine_log_t, snakeengine_log_t)
+create_files_pattern(snakeengine_t, snakeengine_log_t, snakeengine_log_t)
+
+# Temporary files
+allow snakeengine_t snakeengine_var_run_t:dir create_dir_perms;
+allow snakeengine_t snakeengine_var_run_t:file create_file_perms;
+
+# Network (deny by default for security)
+# Uncomment if network features are needed
+# sysnet_read_config(snakeengine_t)
+# corenet_tcp_connect_unreserved_ports(snakeengine_t)
+
+# X11/GUI (if needed)
+# Uncomment for GUI support
+# optional_policy(`
+#     xserver_user_x_domain_template(snakeengine, snakeengine_t, snakeengine_tmpfs_t)
+# ')
+
+########################################
+# Kernel module permissions
+########################################
+
+# Allow the kernel module to be loaded (requires root/admin)
+type snakedrv_ko_t;
+typeattribute snakedrv_ko_t file_type;
+
+# Allow loading the module
+allow snakeengine_t snakedrv_ko_t:system module_load;
+
+########################################
+# Device node creation
+########################################
+
+# udev rules for device creation
+type snakedrv_udev_rules_t;
+typeattribute snakedrv_udev_rules_t file_type;
+
+# Allow udev to create the device
+allow udev_t snakedrv_device_t:chr_file { create setattr };
+
+########################################
+# Boolean definitions
+########################################
+
+## Allow snakeengine to trace any process
+gen_tunable(snakeengine_can_trace_all, true)
+
+## Allow snakeengine network access
+gen_tunable(snakeengine_can_network, false)
+
+if (snakeengine_can_trace_all) {
+    allow snakeengine_t domain:process ptrace;
+    allow snakeengine_t domain:file { read write };
+}
+
+# if (snakeengine_can_network) {
+#    sysnet_read_config(snakeengine_t)
+#    corenet_tcp_sendrecv_generic_if(snakeengine_t)
+#    corenet_tcp_sendrecv_generic_node(snakeengine_t)
+# }

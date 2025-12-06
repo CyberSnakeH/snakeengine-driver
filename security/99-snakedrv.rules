@@ -1,0 +1,34 @@
+# udev rules for SnakeEngine kernel driver
+#
+# Installation:
+#   sudo cp 99-snakedrv.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload-rules
+#   sudo udevadm trigger
+#
+# This rule:
+# - Sets permissions to 0660 (rw for owner and group)
+# - Sets group to 'snakeengine' (create with: groupadd snakeengine)
+# - Alternatively uses 'plugdev' group if snakeengine doesn't exist
+#
+# To allow a user to access the device:
+#   sudo usermod -aG snakeengine $USER
+#   (logout and login required)
+
+# Create device node with correct permissions
+KERNEL=="snakedrv", SUBSYSTEM=="snakedrv", MODE="0660", GROUP="snakeengine"
+
+# Fallback to plugdev group if snakeengine group doesn't exist
+KERNEL=="snakedrv", SUBSYSTEM=="snakedrv", GROUP!="snakeengine", GROUP="plugdev"
+
+# For development/testing: allow all users (NOT recommended for production)
+# Uncomment the following line for permissive mode:
+# KERNEL=="snakedrv", MODE="0666"
+
+# Symlink for convenience
+KERNEL=="snakedrv", SYMLINK+="snake"
+
+# Trigger on module load
+ACTION=="add", KERNEL=="snakedrv", RUN+="/bin/sh -c 'echo SnakeEngine driver loaded >> /var/log/snakeengine.log'"
+
+# Cleanup on module unload
+ACTION=="remove", KERNEL=="snakedrv", RUN+="/bin/sh -c 'echo SnakeEngine driver unloaded >> /var/log/snakeengine.log'"
