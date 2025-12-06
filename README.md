@@ -188,6 +188,11 @@ Contributions are welcome! Please follow the existing coding style, document cha
 
 
 ## Changelog
+* **1.1 (2025-12-06):**
+  * Fixed AppArmor policy errors and improved profile compatibility.
+  * Resolved objtool compilation errors (RETPOLINE/indirect calls) on certain Linux distributions (Ubuntu 24.04+, newer kernels).
+  * Added `sign-module.sh` script for Secure Boot support (MOK key generation and module signing).
+
 * **1.0 (2025-12-01):** Initial release of the `snakeengine-driver`.
   * Kernel module for low-level system interaction.
   * Userland library `libsnakedrv` for application integration.
