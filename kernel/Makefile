@@ -9,13 +9,19 @@
 MODULE_NAME := snakedrv
 
 # Object files
-$(MODULE_NAME)-y := snakedrv_main.o
+$(MODULE_NAME)-y := snakedrv_main.o \
+                    snakedrv_scanner.o \
+                    snakedrv_backend_process.o \
+                    snakedrv_injector.o
 
 # Kernel build directory
 KDIR ?= /lib/modules/$(shell uname -r)/build
 
 # Current directory
 PWD := $(shell pwd)
+
+# Force GCC compiler (kernel was built with GCC)
+CC := gcc
 
 # Compiler flags
 ccflags-y := -Wall -Wextra -Werror

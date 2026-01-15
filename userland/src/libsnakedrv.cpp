@@ -193,6 +193,10 @@ bool Driver::isOpen() const {
     return impl_->fd >= 0;
 }
 
+int Driver::getFd() const {
+    return impl_->fd;
+}
+
 DriverInfo Driver::getInfo() const {
     if (!isOpen()) {
         throw DriverException("Driver not open");
@@ -583,6 +587,214 @@ void Driver::startEventLoop() {
 
 void Driver::stopEventLoop() {
     impl_->stopEventLoop();
+}
+
+/* ============================================================================
+ * Injection / Manual Mapping Implementation
+ * ============================================================================ */
+
+Driver::InjectionResult Driver::injectAlloc(ProcessId pid, size_t size, Protection prot) {
+    InjectionResult result{false, 0, 0, ""};
+
+    if (!isOpen()) {
+        result.errorMsg = "Driver not open";
+        return result;
+    }
+
+    snake_inject_alloc alloc{};
+    alloc.pid = pid;
+    alloc.size = size;
+    alloc.protection = static_cast<uint32_t>(prot);
+
+    if (ioctl(impl_->fd, SNAKE_IOCTL_INJECT_ALLOC, &alloc) < 0) {
+        result.errorCode = errno;
+        result.errorMsg = "IOCTL failed: " + std::string(strerror(errno));
+        return result;
+    }
+
+    if (alloc.result != 0) {
+        result.errorCode = alloc.result;
+        result.errorMsg = "Kernel error: " + std::to_string(alloc.result);
+        return result;
+    }
+
+    result.success = true;
+    result.address = alloc.address;
+    return result;
+}
+
+Driver::InjectionResult Driver::injectProtect(ProcessId pid, Address address, size_t size, Protection prot) {
+    InjectionResult result{false, 0, 0, ""};
+
+    if (!isOpen()) {
+        result.errorMsg = "Driver not open";
+        return result;
+    }
+
+    snake_inject_protect protect{};
+    protect.pid = pid;
+    protect.address = address;
+    protect.size = size;
+    protect.protection = static_cast<uint32_t>(prot);
+
+    if (ioctl(impl_->fd, SNAKE_IOCTL_INJECT_PROTECT, &protect) < 0) {
+        result.errorCode = errno;
+        result.errorMsg = "IOCTL failed: " + std::string(strerror(errno));
+        return result;
+    }
+
+    if (protect.result != 0) {
+        result.errorCode = protect.result;
+        result.errorMsg = "Kernel error: " + std::to_string(protect.result);
+        return result;
+    }
+
+    result.success = true;
+    result.address = address;
+    return result;
+}
+
+Driver::InjectionResult Driver::injectThread(ProcessId pid, Address entryPoint, uint64_t argument) {
+    InjectionResult result{false, 0, 0, ""};
+
+    if (!isOpen()) {
+        result.errorMsg = "Driver not open";
+        return result;
+    }
+
+    snake_inject_thread thread{};
+    thread.pid = pid;
+    thread.start_address = entryPoint;
+    thread.argument = argument;
+
+    if (ioctl(impl_->fd, SNAKE_IOCTL_INJECT_THREAD, &thread) < 0) {
+        result.errorCode = errno;
+        result.errorMsg = "IOCTL failed: " + std::string(strerror(errno));
+        return result;
+    }
+
+    if (thread.result != 0) {
+        result.errorCode = thread.result;
+        result.errorMsg = "Kernel error: " + std::to_string(thread.result);
+        return result;
+    }
+
+    result.success = true;
+    result.address = entryPoint;
+    return result;
+}
+
+Driver::InjectionResult Driver::manualMapLibrary(ProcessId pid, const std::string& libraryPath) {
+    InjectionResult result{false, 0, 0, ""};
+
+    // TODO: Implement full manual mapping
+    // For now, return a placeholder error
+    result.errorMsg = "Manual mapping not yet implemented. Use Allocate + Write + Protect workflow.";
+    return result;
+}
+
+Driver::InjectionResult Driver::executeShellcode(ProcessId pid, const std::vector<uint8_t>& shellcode, uint64_t argument) {
+    InjectionResult result{false, 0, 0, ""};
+
+    if (shellcode.empty()) {
+        result.errorMsg = "Empty shellcode";
+        return result;
+    }
+
+    // Step 1: Allocate RWX memory
+    auto allocResult = injectAlloc(pid, shellcode.size(), Protection::ReadWriteExecute);
+    if (!allocResult.success) {
+        result.errorMsg = "Allocation failed: " + allocResult.errorMsg;
+        return result;
+    }
+
+    // Step 2: Write shellcode (need to attach first)
+    bool wasAttached = isAttached() && attachedPid() == pid;
+    if (!wasAttached) {
+        if (!attach(pid)) {
+            result.errorMsg = "Failed to attach for write";
+            return result;
+        }
+    }
+
+    size_t written = writeMemory(allocResult.address, shellcode.data(), shellcode.size());
+    if (written != shellcode.size()) {
+        result.errorMsg = "Failed to write shellcode";
+        if (!wasAttached) detach();
+        return result;
+    }
+
+    if (!wasAttached) detach();
+
+    // Step 3: Execute
+    auto threadResult = injectThread(pid, allocResult.address, argument);
+    if (!threadResult.success) {
+        result.errorMsg = "Thread hijack failed: " + threadResult.errorMsg;
+        return result;
+    }
+
+    result.success = true;
+    result.address = allocResult.address;
+    return result;
+}
+
+bool Driver::suspendProcess(ProcessId pid) {
+    if (!isOpen()) return false;
+
+    snake_process_op op{};
+    op.pid = pid;
+    op.operation = SNAKE_PROC_OP_SUSPEND;
+
+    return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
+}
+
+bool Driver::resumeProcess(ProcessId pid) {
+    if (!isOpen()) return false;
+
+    snake_process_op op{};
+    op.pid = pid;
+    op.operation = SNAKE_PROC_OP_RESUME;
+
+    return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
+}
+
+bool Driver::killProcess(ProcessId pid) {
+    if (!isOpen()) return false;
+
+    snake_process_op op{};
+    op.pid = pid;
+    op.operation = SNAKE_PROC_OP_KILL;
+
+    return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
+}
+
+std::optional<Driver::ExtendedProcessInfo> Driver::getProcessInfo(ProcessId pid) {
+    if (!isOpen()) return std::nullopt;
+
+    snake_process_info kinfo{};
+    kinfo.pid = pid;
+
+    if (ioctl(impl_->fd, SNAKE_IOCTL_GET_PROC_INFO, &kinfo) < 0) {
+        return std::nullopt;
+    }
+
+    ExtendedProcessInfo info;
+    info.pid = kinfo.pid;
+    info.tgid = kinfo.tgid;
+    info.ppid = kinfo.ppid;
+    info.startTime = kinfo.start_time;
+    info.startCode = kinfo.mm_start_code;
+    info.endCode = kinfo.mm_end_code;
+    info.startStack = kinfo.mm_start_stack;
+    info.name = kinfo.comm;
+    info.exePath = kinfo.exe_path;
+
+    return info;
+}
+
+std::vector<Driver::KernelThreadInfo> Driver::getKernelThreads(ProcessId pid) {
+    // TODO: Implement thread enumeration via kernel
+    return {};
 }
 
 /* ============================================================================

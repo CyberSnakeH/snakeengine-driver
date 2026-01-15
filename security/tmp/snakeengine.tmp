@@ -1,0 +1,3649 @@
+#line 1 "/usr/share/selinux/devel/include/support/all_perms.spt"
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#line 239
+
+
+#line 274
+
+#line 1 "/usr/share/selinux/devel/include/support/file_patterns.spt"
+#
+# Directory patterns (dir)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. directory type
+#
+#line 12
+
+
+#line 17
+
+
+#line 22
+
+
+#line 27
+
+
+#line 32
+
+
+#line 37
+
+
+#line 42
+
+
+#line 47
+
+
+#line 52
+
+
+#line 57
+
+
+#line 62
+
+
+#line 67
+
+
+#line 72
+
+
+#line 77
+
+
+#line 82
+
+#line 86
+
+#line 90
+
+#line 94
+
+#line 98
+
+
+#
+# Regular file patterns (file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 111
+
+
+#line 116
+
+
+#line 121
+
+
+#line 126
+
+
+#line 133
+
+
+#line 138
+
+
+#line 143
+
+
+#line 148
+
+
+#line 153
+
+
+#line 158
+
+
+#line 163
+
+
+#line 168
+
+
+#line 173
+
+
+#line 178
+
+
+#line 183
+
+
+#line 188
+
+
+#line 193
+
+
+#line 198
+
+
+#line 203
+
+
+#
+# Symbolic link patterns (lnk_file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 216
+
+
+#line 221
+
+
+#line 226
+
+
+#line 231
+
+
+#line 236
+
+
+#line 241
+
+
+#line 246
+
+
+#line 251
+
+
+#line 256
+
+
+#line 261
+
+
+#line 266
+
+
+#line 271
+
+
+#line 276
+
+
+#line 281
+
+
+#
+# (Un)named Pipes/FIFO patterns (fifo_file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 294
+
+
+#line 299
+
+
+#line 304
+
+
+#line 309
+
+
+#line 314
+
+
+#line 319
+
+
+#line 324
+
+
+#line 329
+
+
+#line 334
+
+
+#line 339
+
+
+#line 344
+
+
+#line 349
+
+
+#line 354
+
+
+#line 359
+
+
+#
+# (Un)named sockets patterns (sock_file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 372
+
+
+#line 377
+
+
+#line 382
+
+
+#line 387
+
+
+#line 392
+
+
+#line 397
+
+
+#line 402
+
+
+#line 407
+
+
+#line 412
+
+
+#line 417
+
+
+#line 422
+
+
+#line 427
+
+
+#line 432
+
+
+#
+# Block device node patterns (blk_file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 445
+
+
+#line 450
+
+
+#line 455
+
+
+#line 460
+
+
+#line 465
+
+
+#line 470
+
+
+#line 475
+
+
+#line 481
+
+
+#line 486
+
+
+#line 491
+
+
+#line 497
+
+
+#line 502
+
+
+#line 507
+
+
+#line 512
+
+
+#line 517
+
+
+#
+# Character device node patterns (chr_file)
+#
+# Parameters:
+# 1. domain type
+# 2. container (directory) type
+# 3. file type
+#
+#line 530
+
+
+#line 535
+
+
+#line 540
+
+
+#line 545
+
+
+#line 550
+
+
+#line 555
+
+
+#line 561
+
+
+#line 566
+
+
+#line 571
+
+
+#line 577
+
+
+#line 582
+
+
+#line 587
+
+
+#line 592
+
+
+#line 597
+
+
+#
+# File type_transition patterns
+#
+# filetrans_add_pattern(domain,dirtype,newtype,class(es),[filename])
+#
+#line 607
+
+
+#
+# filetrans_pattern(domain,dirtype,newtype,class(es),[filename])
+#
+#line 615
+
+
+#line 629
+
+#line 1 "/usr/share/selinux/devel/include/support/ipc_patterns.spt"
+#
+# unix domain socket patterns
+#
+#line 8
+
+
+#line 14
+
+#line 1 "/usr/share/selinux/devel/include/support/loadable_module.spt"
+########################################
+#
+# Macros for switching between source policy
+# and loadable policy module support
+#
+
+##############################
+#
+# For adding the module statement
+#
+#line 30
+
+
+##############################
+#
+# For use in interfaces, to optionally insert a require block
+#
+#line 48
+
+
+# helper function, since m4 wont expand macros
+# if a line is a comment (#):
+#line 55
+
+##############################
+#
+# In the future interfaces should be in loadable modules
+#
+# template(name,rules)
+#
+#line 71
+
+
+##############################
+#
+# In the future interfaces should be in loadable modules
+#
+# interface(name,rules)
+#
+#line 88
+
+
+
+
+##############################
+#
+# Optional policy handling
+#
+#line 102
+
+
+##############################
+#
+# Determine if we should use the default
+# tunable value as specified by the policy
+# or if the override value should be used
+#
+
+
+##############################
+#
+# Extract booleans out of an expression.
+# This needs to be reworked so expressions
+# with parentheses can work.
+
+#line 123
+
+
+##############################
+#
+# Tunable declaration
+#
+#line 131
+
+
+##############################
+#
+# Tunable policy handling
+#
+#line 146
+
+#line 1 "/usr/share/selinux/devel/include/support/misc_macros.spt"
+
+########################################
+#
+# Helper macros
+#
+
+#
+# shiftn(num,list...)
+#
+# shift the list num times
+#
+
+
+#
+# ifndef(expr,true_block,false_block)
+#
+# m4 does not have this.
+#
+
+
+#
+# __endline__
+#
+# dummy macro to insert a newline.  used for 
+# errprint, so the close parentheses can be
+# indented correctly.
+#
+#line 29
+
+
+########################################
+#
+# refpolwarn(message)
+#
+# print a warning message
+#
+
+
+########################################
+#
+# refpolerr(message)
+#
+# print an error message.  does not
+# make anything fail.
+#
+
+
+########################################
+#
+# gen_user(username, prefix, role_set, mls_defaultlevel, mls_range, [mcs_categories])
+#
+#line 58
+
+
+########################################
+#
+# gen_context(context,mls_sensitivity,[mcs_categories])
+#
+#line 65
+
+########################################
+#
+# can_exec(domain,executable)
+#
+
+
+########################################
+#
+# gen_bool(name,default_value)
+#
+#line 78
+
+#line 1 "/usr/share/selinux/devel/include/support/misc_patterns.spt"
+#
+# Specified domain transition patterns
+#
+#line 8
+
+
+# compatibility:
+
+
+#line 20
+
+
+#
+# Automatic domain transition patterns
+#
+#line 28
+
+
+# compatibility:
+
+
+#line 39
+
+
+#
+# Dynamic transition pattern
+#
+#line 48
+
+
+#
+# Other process permissions
+#
+#line 58
+
+#line 1 "/usr/share/selinux/devel/include/support/mls_mcs_macros.spt"
+########################################
+#
+# gen_cats(N)
+#
+# declares categores c0 to c(N-1)
+#
+#line 10
+
+
+
+
+########################################
+#
+# gen_sens(N)
+#
+# declares sensitivites s0 to s(N-1) with dominance
+# in increasing numeric order with s0 lowest, s(N-1) highest
+#
+#line 24
+
+
+
+
+#line 34
+
+
+########################################
+#
+# gen_levels(N,M)
+#
+# levels from s0 to (N-1) with categories c0 to (M-1)
+#
+#line 45
+
+
+
+
+########################################
+#
+# Basic level names for system low and high
+#
+
+
+
+
+
+#line 1 "/usr/share/selinux/devel/include/support/obj_perm_sets.spt"
+########################################
+# 
+# Support macros for sets of object classes and permissions
+#
+# This file should only have object class and permission set macros - they
+# can only reference object classes and/or permissions.
+
+#
+# All directory and file classes
+#
+
+
+#
+# All non-directory file classes.
+#
+
+
+#
+# Non-device file classes.
+#
+
+
+#
+# Device file classes.
+#
+
+
+#
+# All socket classes.
+#
+
+
+#
+# Datagram socket classes.
+# 
+
+
+#
+# Stream socket classes.
+#
+
+
+#
+# Unprivileged socket classes (exclude rawip, netlink, packet).
+#
+
+
+########################################
+# 
+# Macros for sets of permissions
+#
+
+#
+# Permissions to mount and unmount file systems.
+#
+
+
+#
+# Permissions for using sockets.
+# 
+
+
+#
+# Permissions for creating and using sockets.
+# 
+
+
+#
+# Permissions for using stream sockets.
+# 
+
+
+#
+# Permissions for creating and using stream sockets.
+# 
+
+
+#
+# Permissions for creating and using sockets.
+# 
+
+
+#
+# Permissions for creating and using sockets.
+# 
+
+
+
+#
+# Permissions for creating and using netlink sockets.
+# 
+
+
+#
+# Permissions for using netlink sockets for operations that modify state.
+# 
+
+
+#
+# Permissions for using netlink sockets for operations that observe state.
+# 
+
+
+#
+# Permissions for sending all signals.
+#
+
+
+#
+# Permissions for sending and receiving network packets.
+#
+
+
+#
+# Permissions for using System V IPC
+#
+
+
+
+
+
+
+
+
+
+
+########################################
+#
+# New permission sets
+#
+
+#
+# Directory (dir)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# Regular file (file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# Symbolic link (lnk_file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# (Un)named Pipes/FIFOs (fifo_file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# (Un)named Sockets (sock_file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# Block device nodes (blk_file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# Character device nodes (chr_file)
+#
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+#
+# Anonymous inode files (anon_inode)
+#
+#line 289
+
+#line 294
+
+
+########################################
+#
+# Special permission sets
+#
+
+#
+# Use (read and write) terminals
+#
+
+
+
+#
+# Sockets
+#
+
+
+
+#
+# Keys
+#
+
+
+#
+# Service
+#
+
+
+#
+# perf_event
+#
+
+
+
+#line 44406 "tmp/all_interfaces.conf"
+
+#line 1 "snakeengine.te"
+# SELinux Type Enforcement Policy for SnakeEngine
+#
+# Compilation:
+#   checkmodule -M -m -o snakeengine.mod snakeengine.te
+#   semodule_package -o snakeengine.pp -m snakeengine.mod -f snakeengine.fc
+#   semodule -i snakeengine.pp
+#
+# Troubleshooting:
+#   # Check for denials
+#   ausearch -m avc -ts recent
+#   
+#   # Generate policy from denials
+#   audit2allow -a -M snakeengine_local
+#
+# Removal:
+#   semodule -r snakeengine
+
+
+#line 18
+	
+#line 18
+		module snakeengine 1.0.0;
+#line 18
+
+#line 18
+		require {
+#line 18
+			role system_r;
+#line 18
+			
+#line 18
+	class security { compute_av compute_create compute_member check_context load_policy compute_relabel compute_user setenforce setbool setsecparam setcheckreqprot read_policy validate_trans };
+#line 18
+	class process { fork transition sigchld sigkill sigstop signull signal ptrace getsched setsched getsession getpgid setpgid getcap setcap share getattr setexec setfscreate noatsecure siginh setrlimit rlimitinh dyntransition setcurrent execmem execstack execheap setkeycreate setsockcreate getrlimit };
+#line 18
+	class system { ipc_info syslog_read syslog_mod syslog_console module_request module_load halt reboot status start stop enable disable reload undefined };
+#line 18
+	class capability { chown dac_override dac_read_search fowner fsetid kill setgid setuid setpcap linux_immutable net_bind_service net_broadcast net_admin net_raw ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control setfcap };
+#line 18
+	class filesystem { mount remount unmount getattr relabelfrom relabelto transition associate quotamod quotaget watch };
+#line 18
+	class file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns execute_no_trans entrypoint };
+#line 18
+	class dir { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns add_name remove_name reparent search rmdir };
+#line 18
+	class fd { use };
+#line 18
+	class lnk_file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns };
+#line 18
+	class chr_file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns execute_no_trans entrypoint };
+#line 18
+	class blk_file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns };
+#line 18
+	class sock_file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns };
+#line 18
+	class fifo_file { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns };
+#line 18
+	class anon_inode { ioctl read write create getattr setattr lock relabelfrom relabelto append map unlink link rename execute swapon quotaon mounton audit_access open execmod watch watch_mount watch_sb watch_with_perm watch_reads watch_mountns };
+#line 18
+	class socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class tcp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind connectto newconn acceptfrom node_bind name_connect };
+#line 18
+	class udp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind node_bind };
+#line 18
+	class rawip_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind node_bind };
+#line 18
+	class node { tcp_recv tcp_send udp_recv udp_send rawip_recv rawip_send enforce_dest dccp_recv dccp_send recvfrom sendto };
+#line 18
+	class netif { tcp_recv tcp_send udp_recv udp_send rawip_recv rawip_send dccp_recv dccp_send ingress egress };
+#line 18
+	class netlink_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class packet_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class key_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class unix_stream_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind connectto newconn acceptfrom };
+#line 18
+	class unix_dgram_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class sem { create destroy getattr setattr read write associate unix_read unix_write };
+#line 18
+	class msg { send receive };
+#line 18
+	class msgq { create destroy getattr setattr read write associate unix_read unix_write enqueue };
+#line 18
+	class shm { create destroy getattr setattr read write associate unix_read unix_write lock };
+#line 18
+	class ipc { create destroy getattr setattr read write associate unix_read unix_write };
+#line 18
+	class netlink_route_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write nlmsg };
+#line 18
+	class netlink_firewall_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write };
+#line 18
+	class netlink_tcpdiag_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write nlmsg };
+#line 18
+	class netlink_nflog_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_xfrm_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write nlmsg };
+#line 18
+	class netlink_selinux_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_audit_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write nlmsg_relay nlmsg_readpriv nlmsg_tty_audit nlmsg };
+#line 18
+	class netlink_ip6fw_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind nlmsg_read nlmsg_write };
+#line 18
+	class netlink_dnrt_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class association { sendto recvfrom setcontext polmatch };
+#line 18
+	class netlink_kobject_uevent_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class appletalk_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class packet { send recv relabelto flow_in flow_out forward_in forward_out };
+#line 18
+	class key { view read write search link setattr create };
+#line 18
+	class dccp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind node_bind name_connect };
+#line 18
+	class memprotect { mmap_zero };
+#line 18
+	class peer { recv };
+#line 18
+	class capability2 { mac_override mac_admin syslog wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore epolwakeup };
+#line 18
+	class kernel_service { use_as_override create_files_as };
+#line 18
+	class tun_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind attach_queue };
+#line 18
+	class binder { impersonate call set_context_mgr transfer };
+#line 18
+	class netlink_iscsi_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_fib_lookup_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_connector_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_netfilter_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_generic_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_scsitransport_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_rdma_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netlink_crypto_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class infiniband_pkey { access };
+#line 18
+	class infiniband_endport { manage_subnet };
+#line 18
+	class service { start stop status reload enable disable };
+#line 18
+	class proxy { read };
+#line 18
+	class cap_userns { chown dac_override dac_read_search fowner fsetid kill setgid setuid setpcap linux_immutable net_bind_service net_broadcast net_admin net_raw ipc_lock ipc_owner sys_module sys_rawio sys_chroot sys_ptrace sys_pacct sys_admin sys_boot sys_nice sys_resource sys_time sys_tty_config mknod lease audit_write audit_control setfcap };
+#line 18
+	class cap2_userns { mac_override mac_admin syslog wake_alarm block_suspend audit_read perfmon bpf checkpoint_restore };
+#line 18
+	class process2 { nnp_transition nosuid_transition };
+#line 18
+	class sctp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind node_bind name_connect association };
+#line 18
+	class icmp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind node_bind };
+#line 18
+	class ax25_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class ipx_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class netrom_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class atmpvc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class x25_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class rose_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class decnet_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class atmsvc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class rds_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class irda_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class pppox_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class llc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class can_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class tipc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class bluetooth_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class iucv_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class rxrpc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class isdn_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class phonet_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class ieee802154_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class caif_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class alg_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class nfc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class vsock_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class kcm_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class qipcrtr_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class smc_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class bpf { map_create map_read map_write prog_load prog_run };
+#line 18
+	class xdp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class mctp_socket { ioctl read write create getattr setattr lock relabelfrom relabelto append map bind connect listen accept getopt setopt shutdown recvfrom sendto recv_msg send_msg name_bind };
+#line 18
+	class perf_event { open cpu kernel tracepoint read write };
+#line 18
+	class lockdown { integrity confidentiality };
+#line 18
+	class io_uring { override_creds sqpoll cmd };
+#line 18
+	class user_namespace { create };
+#line 18
+
+#line 18
+
+#line 18
+			
+#line 18
+				sensitivity s0;
+#line 18
+
+#line 18
+				category c0;
+#line 18
+category c1;
+#line 18
+category c2;
+#line 18
+category c3;
+#line 18
+category c4;
+#line 18
+category c5;
+#line 18
+category c6;
+#line 18
+category c7;
+#line 18
+category c8;
+#line 18
+category c9;
+#line 18
+category c10;
+#line 18
+category c11;
+#line 18
+category c12;
+#line 18
+category c13;
+#line 18
+category c14;
+#line 18
+category c15;
+#line 18
+category c16;
+#line 18
+category c17;
+#line 18
+category c18;
+#line 18
+category c19;
+#line 18
+category c20;
+#line 18
+category c21;
+#line 18
+category c22;
+#line 18
+category c23;
+#line 18
+category c24;
+#line 18
+category c25;
+#line 18
+category c26;
+#line 18
+category c27;
+#line 18
+category c28;
+#line 18
+category c29;
+#line 18
+category c30;
+#line 18
+category c31;
+#line 18
+category c32;
+#line 18
+category c33;
+#line 18
+category c34;
+#line 18
+category c35;
+#line 18
+category c36;
+#line 18
+category c37;
+#line 18
+category c38;
+#line 18
+category c39;
+#line 18
+category c40;
+#line 18
+category c41;
+#line 18
+category c42;
+#line 18
+category c43;
+#line 18
+category c44;
+#line 18
+category c45;
+#line 18
+category c46;
+#line 18
+category c47;
+#line 18
+category c48;
+#line 18
+category c49;
+#line 18
+category c50;
+#line 18
+category c51;
+#line 18
+category c52;
+#line 18
+category c53;
+#line 18
+category c54;
+#line 18
+category c55;
+#line 18
+category c56;
+#line 18
+category c57;
+#line 18
+category c58;
+#line 18
+category c59;
+#line 18
+category c60;
+#line 18
+category c61;
+#line 18
+category c62;
+#line 18
+category c63;
+#line 18
+category c64;
+#line 18
+category c65;
+#line 18
+category c66;
+#line 18
+category c67;
+#line 18
+category c68;
+#line 18
+category c69;
+#line 18
+category c70;
+#line 18
+category c71;
+#line 18
+category c72;
+#line 18
+category c73;
+#line 18
+category c74;
+#line 18
+category c75;
+#line 18
+category c76;
+#line 18
+category c77;
+#line 18
+category c78;
+#line 18
+category c79;
+#line 18
+category c80;
+#line 18
+category c81;
+#line 18
+category c82;
+#line 18
+category c83;
+#line 18
+category c84;
+#line 18
+category c85;
+#line 18
+category c86;
+#line 18
+category c87;
+#line 18
+category c88;
+#line 18
+category c89;
+#line 18
+category c90;
+#line 18
+category c91;
+#line 18
+category c92;
+#line 18
+category c93;
+#line 18
+category c94;
+#line 18
+category c95;
+#line 18
+category c96;
+#line 18
+category c97;
+#line 18
+category c98;
+#line 18
+category c99;
+#line 18
+category c100;
+#line 18
+category c101;
+#line 18
+category c102;
+#line 18
+category c103;
+#line 18
+category c104;
+#line 18
+category c105;
+#line 18
+category c106;
+#line 18
+category c107;
+#line 18
+category c108;
+#line 18
+category c109;
+#line 18
+category c110;
+#line 18
+category c111;
+#line 18
+category c112;
+#line 18
+category c113;
+#line 18
+category c114;
+#line 18
+category c115;
+#line 18
+category c116;
+#line 18
+category c117;
+#line 18
+category c118;
+#line 18
+category c119;
+#line 18
+category c120;
+#line 18
+category c121;
+#line 18
+category c122;
+#line 18
+category c123;
+#line 18
+category c124;
+#line 18
+category c125;
+#line 18
+category c126;
+#line 18
+category c127;
+#line 18
+category c128;
+#line 18
+category c129;
+#line 18
+category c130;
+#line 18
+category c131;
+#line 18
+category c132;
+#line 18
+category c133;
+#line 18
+category c134;
+#line 18
+category c135;
+#line 18
+category c136;
+#line 18
+category c137;
+#line 18
+category c138;
+#line 18
+category c139;
+#line 18
+category c140;
+#line 18
+category c141;
+#line 18
+category c142;
+#line 18
+category c143;
+#line 18
+category c144;
+#line 18
+category c145;
+#line 18
+category c146;
+#line 18
+category c147;
+#line 18
+category c148;
+#line 18
+category c149;
+#line 18
+category c150;
+#line 18
+category c151;
+#line 18
+category c152;
+#line 18
+category c153;
+#line 18
+category c154;
+#line 18
+category c155;
+#line 18
+category c156;
+#line 18
+category c157;
+#line 18
+category c158;
+#line 18
+category c159;
+#line 18
+category c160;
+#line 18
+category c161;
+#line 18
+category c162;
+#line 18
+category c163;
+#line 18
+category c164;
+#line 18
+category c165;
+#line 18
+category c166;
+#line 18
+category c167;
+#line 18
+category c168;
+#line 18
+category c169;
+#line 18
+category c170;
+#line 18
+category c171;
+#line 18
+category c172;
+#line 18
+category c173;
+#line 18
+category c174;
+#line 18
+category c175;
+#line 18
+category c176;
+#line 18
+category c177;
+#line 18
+category c178;
+#line 18
+category c179;
+#line 18
+category c180;
+#line 18
+category c181;
+#line 18
+category c182;
+#line 18
+category c183;
+#line 18
+category c184;
+#line 18
+category c185;
+#line 18
+category c186;
+#line 18
+category c187;
+#line 18
+category c188;
+#line 18
+category c189;
+#line 18
+category c190;
+#line 18
+category c191;
+#line 18
+category c192;
+#line 18
+category c193;
+#line 18
+category c194;
+#line 18
+category c195;
+#line 18
+category c196;
+#line 18
+category c197;
+#line 18
+category c198;
+#line 18
+category c199;
+#line 18
+category c200;
+#line 18
+category c201;
+#line 18
+category c202;
+#line 18
+category c203;
+#line 18
+category c204;
+#line 18
+category c205;
+#line 18
+category c206;
+#line 18
+category c207;
+#line 18
+category c208;
+#line 18
+category c209;
+#line 18
+category c210;
+#line 18
+category c211;
+#line 18
+category c212;
+#line 18
+category c213;
+#line 18
+category c214;
+#line 18
+category c215;
+#line 18
+category c216;
+#line 18
+category c217;
+#line 18
+category c218;
+#line 18
+category c219;
+#line 18
+category c220;
+#line 18
+category c221;
+#line 18
+category c222;
+#line 18
+category c223;
+#line 18
+category c224;
+#line 18
+category c225;
+#line 18
+category c226;
+#line 18
+category c227;
+#line 18
+category c228;
+#line 18
+category c229;
+#line 18
+category c230;
+#line 18
+category c231;
+#line 18
+category c232;
+#line 18
+category c233;
+#line 18
+category c234;
+#line 18
+category c235;
+#line 18
+category c236;
+#line 18
+category c237;
+#line 18
+category c238;
+#line 18
+category c239;
+#line 18
+category c240;
+#line 18
+category c241;
+#line 18
+category c242;
+#line 18
+category c243;
+#line 18
+category c244;
+#line 18
+category c245;
+#line 18
+category c246;
+#line 18
+category c247;
+#line 18
+category c248;
+#line 18
+category c249;
+#line 18
+category c250;
+#line 18
+category c251;
+#line 18
+category c252;
+#line 18
+category c253;
+#line 18
+category c254;
+#line 18
+category c255;
+#line 18
+category c256;
+#line 18
+category c257;
+#line 18
+category c258;
+#line 18
+category c259;
+#line 18
+category c260;
+#line 18
+category c261;
+#line 18
+category c262;
+#line 18
+category c263;
+#line 18
+category c264;
+#line 18
+category c265;
+#line 18
+category c266;
+#line 18
+category c267;
+#line 18
+category c268;
+#line 18
+category c269;
+#line 18
+category c270;
+#line 18
+category c271;
+#line 18
+category c272;
+#line 18
+category c273;
+#line 18
+category c274;
+#line 18
+category c275;
+#line 18
+category c276;
+#line 18
+category c277;
+#line 18
+category c278;
+#line 18
+category c279;
+#line 18
+category c280;
+#line 18
+category c281;
+#line 18
+category c282;
+#line 18
+category c283;
+#line 18
+category c284;
+#line 18
+category c285;
+#line 18
+category c286;
+#line 18
+category c287;
+#line 18
+category c288;
+#line 18
+category c289;
+#line 18
+category c290;
+#line 18
+category c291;
+#line 18
+category c292;
+#line 18
+category c293;
+#line 18
+category c294;
+#line 18
+category c295;
+#line 18
+category c296;
+#line 18
+category c297;
+#line 18
+category c298;
+#line 18
+category c299;
+#line 18
+category c300;
+#line 18
+category c301;
+#line 18
+category c302;
+#line 18
+category c303;
+#line 18
+category c304;
+#line 18
+category c305;
+#line 18
+category c306;
+#line 18
+category c307;
+#line 18
+category c308;
+#line 18
+category c309;
+#line 18
+category c310;
+#line 18
+category c311;
+#line 18
+category c312;
+#line 18
+category c313;
+#line 18
+category c314;
+#line 18
+category c315;
+#line 18
+category c316;
+#line 18
+category c317;
+#line 18
+category c318;
+#line 18
+category c319;
+#line 18
+category c320;
+#line 18
+category c321;
+#line 18
+category c322;
+#line 18
+category c323;
+#line 18
+category c324;
+#line 18
+category c325;
+#line 18
+category c326;
+#line 18
+category c327;
+#line 18
+category c328;
+#line 18
+category c329;
+#line 18
+category c330;
+#line 18
+category c331;
+#line 18
+category c332;
+#line 18
+category c333;
+#line 18
+category c334;
+#line 18
+category c335;
+#line 18
+category c336;
+#line 18
+category c337;
+#line 18
+category c338;
+#line 18
+category c339;
+#line 18
+category c340;
+#line 18
+category c341;
+#line 18
+category c342;
+#line 18
+category c343;
+#line 18
+category c344;
+#line 18
+category c345;
+#line 18
+category c346;
+#line 18
+category c347;
+#line 18
+category c348;
+#line 18
+category c349;
+#line 18
+category c350;
+#line 18
+category c351;
+#line 18
+category c352;
+#line 18
+category c353;
+#line 18
+category c354;
+#line 18
+category c355;
+#line 18
+category c356;
+#line 18
+category c357;
+#line 18
+category c358;
+#line 18
+category c359;
+#line 18
+category c360;
+#line 18
+category c361;
+#line 18
+category c362;
+#line 18
+category c363;
+#line 18
+category c364;
+#line 18
+category c365;
+#line 18
+category c366;
+#line 18
+category c367;
+#line 18
+category c368;
+#line 18
+category c369;
+#line 18
+category c370;
+#line 18
+category c371;
+#line 18
+category c372;
+#line 18
+category c373;
+#line 18
+category c374;
+#line 18
+category c375;
+#line 18
+category c376;
+#line 18
+category c377;
+#line 18
+category c378;
+#line 18
+category c379;
+#line 18
+category c380;
+#line 18
+category c381;
+#line 18
+category c382;
+#line 18
+category c383;
+#line 18
+category c384;
+#line 18
+category c385;
+#line 18
+category c386;
+#line 18
+category c387;
+#line 18
+category c388;
+#line 18
+category c389;
+#line 18
+category c390;
+#line 18
+category c391;
+#line 18
+category c392;
+#line 18
+category c393;
+#line 18
+category c394;
+#line 18
+category c395;
+#line 18
+category c396;
+#line 18
+category c397;
+#line 18
+category c398;
+#line 18
+category c399;
+#line 18
+category c400;
+#line 18
+category c401;
+#line 18
+category c402;
+#line 18
+category c403;
+#line 18
+category c404;
+#line 18
+category c405;
+#line 18
+category c406;
+#line 18
+category c407;
+#line 18
+category c408;
+#line 18
+category c409;
+#line 18
+category c410;
+#line 18
+category c411;
+#line 18
+category c412;
+#line 18
+category c413;
+#line 18
+category c414;
+#line 18
+category c415;
+#line 18
+category c416;
+#line 18
+category c417;
+#line 18
+category c418;
+#line 18
+category c419;
+#line 18
+category c420;
+#line 18
+category c421;
+#line 18
+category c422;
+#line 18
+category c423;
+#line 18
+category c424;
+#line 18
+category c425;
+#line 18
+category c426;
+#line 18
+category c427;
+#line 18
+category c428;
+#line 18
+category c429;
+#line 18
+category c430;
+#line 18
+category c431;
+#line 18
+category c432;
+#line 18
+category c433;
+#line 18
+category c434;
+#line 18
+category c435;
+#line 18
+category c436;
+#line 18
+category c437;
+#line 18
+category c438;
+#line 18
+category c439;
+#line 18
+category c440;
+#line 18
+category c441;
+#line 18
+category c442;
+#line 18
+category c443;
+#line 18
+category c444;
+#line 18
+category c445;
+#line 18
+category c446;
+#line 18
+category c447;
+#line 18
+category c448;
+#line 18
+category c449;
+#line 18
+category c450;
+#line 18
+category c451;
+#line 18
+category c452;
+#line 18
+category c453;
+#line 18
+category c454;
+#line 18
+category c455;
+#line 18
+category c456;
+#line 18
+category c457;
+#line 18
+category c458;
+#line 18
+category c459;
+#line 18
+category c460;
+#line 18
+category c461;
+#line 18
+category c462;
+#line 18
+category c463;
+#line 18
+category c464;
+#line 18
+category c465;
+#line 18
+category c466;
+#line 18
+category c467;
+#line 18
+category c468;
+#line 18
+category c469;
+#line 18
+category c470;
+#line 18
+category c471;
+#line 18
+category c472;
+#line 18
+category c473;
+#line 18
+category c474;
+#line 18
+category c475;
+#line 18
+category c476;
+#line 18
+category c477;
+#line 18
+category c478;
+#line 18
+category c479;
+#line 18
+category c480;
+#line 18
+category c481;
+#line 18
+category c482;
+#line 18
+category c483;
+#line 18
+category c484;
+#line 18
+category c485;
+#line 18
+category c486;
+#line 18
+category c487;
+#line 18
+category c488;
+#line 18
+category c489;
+#line 18
+category c490;
+#line 18
+category c491;
+#line 18
+category c492;
+#line 18
+category c493;
+#line 18
+category c494;
+#line 18
+category c495;
+#line 18
+category c496;
+#line 18
+category c497;
+#line 18
+category c498;
+#line 18
+category c499;
+#line 18
+category c500;
+#line 18
+category c501;
+#line 18
+category c502;
+#line 18
+category c503;
+#line 18
+category c504;
+#line 18
+category c505;
+#line 18
+category c506;
+#line 18
+category c507;
+#line 18
+category c508;
+#line 18
+category c509;
+#line 18
+category c510;
+#line 18
+category c511;
+#line 18
+category c512;
+#line 18
+category c513;
+#line 18
+category c514;
+#line 18
+category c515;
+#line 18
+category c516;
+#line 18
+category c517;
+#line 18
+category c518;
+#line 18
+category c519;
+#line 18
+category c520;
+#line 18
+category c521;
+#line 18
+category c522;
+#line 18
+category c523;
+#line 18
+category c524;
+#line 18
+category c525;
+#line 18
+category c526;
+#line 18
+category c527;
+#line 18
+category c528;
+#line 18
+category c529;
+#line 18
+category c530;
+#line 18
+category c531;
+#line 18
+category c532;
+#line 18
+category c533;
+#line 18
+category c534;
+#line 18
+category c535;
+#line 18
+category c536;
+#line 18
+category c537;
+#line 18
+category c538;
+#line 18
+category c539;
+#line 18
+category c540;
+#line 18
+category c541;
+#line 18
+category c542;
+#line 18
+category c543;
+#line 18
+category c544;
+#line 18
+category c545;
+#line 18
+category c546;
+#line 18
+category c547;
+#line 18
+category c548;
+#line 18
+category c549;
+#line 18
+category c550;
+#line 18
+category c551;
+#line 18
+category c552;
+#line 18
+category c553;
+#line 18
+category c554;
+#line 18
+category c555;
+#line 18
+category c556;
+#line 18
+category c557;
+#line 18
+category c558;
+#line 18
+category c559;
+#line 18
+category c560;
+#line 18
+category c561;
+#line 18
+category c562;
+#line 18
+category c563;
+#line 18
+category c564;
+#line 18
+category c565;
+#line 18
+category c566;
+#line 18
+category c567;
+#line 18
+category c568;
+#line 18
+category c569;
+#line 18
+category c570;
+#line 18
+category c571;
+#line 18
+category c572;
+#line 18
+category c573;
+#line 18
+category c574;
+#line 18
+category c575;
+#line 18
+category c576;
+#line 18
+category c577;
+#line 18
+category c578;
+#line 18
+category c579;
+#line 18
+category c580;
+#line 18
+category c581;
+#line 18
+category c582;
+#line 18
+category c583;
+#line 18
+category c584;
+#line 18
+category c585;
+#line 18
+category c586;
+#line 18
+category c587;
+#line 18
+category c588;
+#line 18
+category c589;
+#line 18
+category c590;
+#line 18
+category c591;
+#line 18
+category c592;
+#line 18
+category c593;
+#line 18
+category c594;
+#line 18
+category c595;
+#line 18
+category c596;
+#line 18
+category c597;
+#line 18
+category c598;
+#line 18
+category c599;
+#line 18
+category c600;
+#line 18
+category c601;
+#line 18
+category c602;
+#line 18
+category c603;
+#line 18
+category c604;
+#line 18
+category c605;
+#line 18
+category c606;
+#line 18
+category c607;
+#line 18
+category c608;
+#line 18
+category c609;
+#line 18
+category c610;
+#line 18
+category c611;
+#line 18
+category c612;
+#line 18
+category c613;
+#line 18
+category c614;
+#line 18
+category c615;
+#line 18
+category c616;
+#line 18
+category c617;
+#line 18
+category c618;
+#line 18
+category c619;
+#line 18
+category c620;
+#line 18
+category c621;
+#line 18
+category c622;
+#line 18
+category c623;
+#line 18
+category c624;
+#line 18
+category c625;
+#line 18
+category c626;
+#line 18
+category c627;
+#line 18
+category c628;
+#line 18
+category c629;
+#line 18
+category c630;
+#line 18
+category c631;
+#line 18
+category c632;
+#line 18
+category c633;
+#line 18
+category c634;
+#line 18
+category c635;
+#line 18
+category c636;
+#line 18
+category c637;
+#line 18
+category c638;
+#line 18
+category c639;
+#line 18
+category c640;
+#line 18
+category c641;
+#line 18
+category c642;
+#line 18
+category c643;
+#line 18
+category c644;
+#line 18
+category c645;
+#line 18
+category c646;
+#line 18
+category c647;
+#line 18
+category c648;
+#line 18
+category c649;
+#line 18
+category c650;
+#line 18
+category c651;
+#line 18
+category c652;
+#line 18
+category c653;
+#line 18
+category c654;
+#line 18
+category c655;
+#line 18
+category c656;
+#line 18
+category c657;
+#line 18
+category c658;
+#line 18
+category c659;
+#line 18
+category c660;
+#line 18
+category c661;
+#line 18
+category c662;
+#line 18
+category c663;
+#line 18
+category c664;
+#line 18
+category c665;
+#line 18
+category c666;
+#line 18
+category c667;
+#line 18
+category c668;
+#line 18
+category c669;
+#line 18
+category c670;
+#line 18
+category c671;
+#line 18
+category c672;
+#line 18
+category c673;
+#line 18
+category c674;
+#line 18
+category c675;
+#line 18
+category c676;
+#line 18
+category c677;
+#line 18
+category c678;
+#line 18
+category c679;
+#line 18
+category c680;
+#line 18
+category c681;
+#line 18
+category c682;
+#line 18
+category c683;
+#line 18
+category c684;
+#line 18
+category c685;
+#line 18
+category c686;
+#line 18
+category c687;
+#line 18
+category c688;
+#line 18
+category c689;
+#line 18
+category c690;
+#line 18
+category c691;
+#line 18
+category c692;
+#line 18
+category c693;
+#line 18
+category c694;
+#line 18
+category c695;
+#line 18
+category c696;
+#line 18
+category c697;
+#line 18
+category c698;
+#line 18
+category c699;
+#line 18
+category c700;
+#line 18
+category c701;
+#line 18
+category c702;
+#line 18
+category c703;
+#line 18
+category c704;
+#line 18
+category c705;
+#line 18
+category c706;
+#line 18
+category c707;
+#line 18
+category c708;
+#line 18
+category c709;
+#line 18
+category c710;
+#line 18
+category c711;
+#line 18
+category c712;
+#line 18
+category c713;
+#line 18
+category c714;
+#line 18
+category c715;
+#line 18
+category c716;
+#line 18
+category c717;
+#line 18
+category c718;
+#line 18
+category c719;
+#line 18
+category c720;
+#line 18
+category c721;
+#line 18
+category c722;
+#line 18
+category c723;
+#line 18
+category c724;
+#line 18
+category c725;
+#line 18
+category c726;
+#line 18
+category c727;
+#line 18
+category c728;
+#line 18
+category c729;
+#line 18
+category c730;
+#line 18
+category c731;
+#line 18
+category c732;
+#line 18
+category c733;
+#line 18
+category c734;
+#line 18
+category c735;
+#line 18
+category c736;
+#line 18
+category c737;
+#line 18
+category c738;
+#line 18
+category c739;
+#line 18
+category c740;
+#line 18
+category c741;
+#line 18
+category c742;
+#line 18
+category c743;
+#line 18
+category c744;
+#line 18
+category c745;
+#line 18
+category c746;
+#line 18
+category c747;
+#line 18
+category c748;
+#line 18
+category c749;
+#line 18
+category c750;
+#line 18
+category c751;
+#line 18
+category c752;
+#line 18
+category c753;
+#line 18
+category c754;
+#line 18
+category c755;
+#line 18
+category c756;
+#line 18
+category c757;
+#line 18
+category c758;
+#line 18
+category c759;
+#line 18
+category c760;
+#line 18
+category c761;
+#line 18
+category c762;
+#line 18
+category c763;
+#line 18
+category c764;
+#line 18
+category c765;
+#line 18
+category c766;
+#line 18
+category c767;
+#line 18
+category c768;
+#line 18
+category c769;
+#line 18
+category c770;
+#line 18
+category c771;
+#line 18
+category c772;
+#line 18
+category c773;
+#line 18
+category c774;
+#line 18
+category c775;
+#line 18
+category c776;
+#line 18
+category c777;
+#line 18
+category c778;
+#line 18
+category c779;
+#line 18
+category c780;
+#line 18
+category c781;
+#line 18
+category c782;
+#line 18
+category c783;
+#line 18
+category c784;
+#line 18
+category c785;
+#line 18
+category c786;
+#line 18
+category c787;
+#line 18
+category c788;
+#line 18
+category c789;
+#line 18
+category c790;
+#line 18
+category c791;
+#line 18
+category c792;
+#line 18
+category c793;
+#line 18
+category c794;
+#line 18
+category c795;
+#line 18
+category c796;
+#line 18
+category c797;
+#line 18
+category c798;
+#line 18
+category c799;
+#line 18
+category c800;
+#line 18
+category c801;
+#line 18
+category c802;
+#line 18
+category c803;
+#line 18
+category c804;
+#line 18
+category c805;
+#line 18
+category c806;
+#line 18
+category c807;
+#line 18
+category c808;
+#line 18
+category c809;
+#line 18
+category c810;
+#line 18
+category c811;
+#line 18
+category c812;
+#line 18
+category c813;
+#line 18
+category c814;
+#line 18
+category c815;
+#line 18
+category c816;
+#line 18
+category c817;
+#line 18
+category c818;
+#line 18
+category c819;
+#line 18
+category c820;
+#line 18
+category c821;
+#line 18
+category c822;
+#line 18
+category c823;
+#line 18
+category c824;
+#line 18
+category c825;
+#line 18
+category c826;
+#line 18
+category c827;
+#line 18
+category c828;
+#line 18
+category c829;
+#line 18
+category c830;
+#line 18
+category c831;
+#line 18
+category c832;
+#line 18
+category c833;
+#line 18
+category c834;
+#line 18
+category c835;
+#line 18
+category c836;
+#line 18
+category c837;
+#line 18
+category c838;
+#line 18
+category c839;
+#line 18
+category c840;
+#line 18
+category c841;
+#line 18
+category c842;
+#line 18
+category c843;
+#line 18
+category c844;
+#line 18
+category c845;
+#line 18
+category c846;
+#line 18
+category c847;
+#line 18
+category c848;
+#line 18
+category c849;
+#line 18
+category c850;
+#line 18
+category c851;
+#line 18
+category c852;
+#line 18
+category c853;
+#line 18
+category c854;
+#line 18
+category c855;
+#line 18
+category c856;
+#line 18
+category c857;
+#line 18
+category c858;
+#line 18
+category c859;
+#line 18
+category c860;
+#line 18
+category c861;
+#line 18
+category c862;
+#line 18
+category c863;
+#line 18
+category c864;
+#line 18
+category c865;
+#line 18
+category c866;
+#line 18
+category c867;
+#line 18
+category c868;
+#line 18
+category c869;
+#line 18
+category c870;
+#line 18
+category c871;
+#line 18
+category c872;
+#line 18
+category c873;
+#line 18
+category c874;
+#line 18
+category c875;
+#line 18
+category c876;
+#line 18
+category c877;
+#line 18
+category c878;
+#line 18
+category c879;
+#line 18
+category c880;
+#line 18
+category c881;
+#line 18
+category c882;
+#line 18
+category c883;
+#line 18
+category c884;
+#line 18
+category c885;
+#line 18
+category c886;
+#line 18
+category c887;
+#line 18
+category c888;
+#line 18
+category c889;
+#line 18
+category c890;
+#line 18
+category c891;
+#line 18
+category c892;
+#line 18
+category c893;
+#line 18
+category c894;
+#line 18
+category c895;
+#line 18
+category c896;
+#line 18
+category c897;
+#line 18
+category c898;
+#line 18
+category c899;
+#line 18
+category c900;
+#line 18
+category c901;
+#line 18
+category c902;
+#line 18
+category c903;
+#line 18
+category c904;
+#line 18
+category c905;
+#line 18
+category c906;
+#line 18
+category c907;
+#line 18
+category c908;
+#line 18
+category c909;
+#line 18
+category c910;
+#line 18
+category c911;
+#line 18
+category c912;
+#line 18
+category c913;
+#line 18
+category c914;
+#line 18
+category c915;
+#line 18
+category c916;
+#line 18
+category c917;
+#line 18
+category c918;
+#line 18
+category c919;
+#line 18
+category c920;
+#line 18
+category c921;
+#line 18
+category c922;
+#line 18
+category c923;
+#line 18
+category c924;
+#line 18
+category c925;
+#line 18
+category c926;
+#line 18
+category c927;
+#line 18
+category c928;
+#line 18
+category c929;
+#line 18
+category c930;
+#line 18
+category c931;
+#line 18
+category c932;
+#line 18
+category c933;
+#line 18
+category c934;
+#line 18
+category c935;
+#line 18
+category c936;
+#line 18
+category c937;
+#line 18
+category c938;
+#line 18
+category c939;
+#line 18
+category c940;
+#line 18
+category c941;
+#line 18
+category c942;
+#line 18
+category c943;
+#line 18
+category c944;
+#line 18
+category c945;
+#line 18
+category c946;
+#line 18
+category c947;
+#line 18
+category c948;
+#line 18
+category c949;
+#line 18
+category c950;
+#line 18
+category c951;
+#line 18
+category c952;
+#line 18
+category c953;
+#line 18
+category c954;
+#line 18
+category c955;
+#line 18
+category c956;
+#line 18
+category c957;
+#line 18
+category c958;
+#line 18
+category c959;
+#line 18
+category c960;
+#line 18
+category c961;
+#line 18
+category c962;
+#line 18
+category c963;
+#line 18
+category c964;
+#line 18
+category c965;
+#line 18
+category c966;
+#line 18
+category c967;
+#line 18
+category c968;
+#line 18
+category c969;
+#line 18
+category c970;
+#line 18
+category c971;
+#line 18
+category c972;
+#line 18
+category c973;
+#line 18
+category c974;
+#line 18
+category c975;
+#line 18
+category c976;
+#line 18
+category c977;
+#line 18
+category c978;
+#line 18
+category c979;
+#line 18
+category c980;
+#line 18
+category c981;
+#line 18
+category c982;
+#line 18
+category c983;
+#line 18
+category c984;
+#line 18
+category c985;
+#line 18
+category c986;
+#line 18
+category c987;
+#line 18
+category c988;
+#line 18
+category c989;
+#line 18
+category c990;
+#line 18
+category c991;
+#line 18
+category c992;
+#line 18
+category c993;
+#line 18
+category c994;
+#line 18
+category c995;
+#line 18
+category c996;
+#line 18
+category c997;
+#line 18
+category c998;
+#line 18
+category c999;
+#line 18
+category c1000;
+#line 18
+category c1001;
+#line 18
+category c1002;
+#line 18
+category c1003;
+#line 18
+category c1004;
+#line 18
+category c1005;
+#line 18
+category c1006;
+#line 18
+category c1007;
+#line 18
+category c1008;
+#line 18
+category c1009;
+#line 18
+category c1010;
+#line 18
+category c1011;
+#line 18
+category c1012;
+#line 18
+category c1013;
+#line 18
+category c1014;
+#line 18
+category c1015;
+#line 18
+category c1016;
+#line 18
+category c1017;
+#line 18
+category c1018;
+#line 18
+category c1019;
+#line 18
+category c1020;
+#line 18
+category c1021;
+#line 18
+category c1022;
+#line 18
+category c1023;
+#line 18
+
+#line 18
+			
+#line 18
+
+#line 18
+			
+#line 18
+		}
+#line 18
+	
+#line 18
+
+
+########################################
+# Type definitions
+########################################
+
+# Executable types
+type snakeengine_t;
+type snakeengine_exec_t;
+
+# Device type for /dev/snakedrv
+type snakedrv_device_t;
+
+# Config file type
+type snakeengine_conf_t;
+
+# Runtime data type
+type snakeengine_var_run_t;
+
+# Log file type
+type snakeengine_log_t;
+
+########################################
+# Role and domain transitions
+########################################
+
+# Allow transition from user domain (explicit domtrans below)
+role system_r types snakeengine_t;
+
+
+#line 47
+	
+#line 47
+		require {
+#line 47
+			
+#line 47
+    type unconfined_t;
+#line 47
+    type udev_t;
+#line 47
+    type proc_t;
+#line 47
+    attribute file_type;
+#line 47
+    attribute domain;
+#line 47
+
+#line 47
+		} # end require
+#line 47
+	
+#line 53
+
+
+# Transition to snakeengine_t when executing snakeengine_exec_t
+
+#line 56
+	
+#line 56
+	
+#line 56
+	allow unconfined_t snakeengine_exec_t:file { getattr open map read execute ioctl };
+#line 56
+	allow unconfined_t snakeengine_t:process transition;
+#line 56
+#	dontaudit unconfined_t snakeengine_t:process { noatsecure siginh rlimitinh };
+#line 56
+
+#line 56
+	type_transition unconfined_t snakeengine_exec_t:process snakeengine_t;
+#line 56
+
+#line 56
+
+#line 56
+	allow snakeengine_t unconfined_t:fd use;
+#line 56
+	allow snakeengine_t unconfined_t:fifo_file { getattr read write append ioctl lock };
+#line 56
+	allow snakeengine_t unconfined_t:process sigchld;
+#line 56
+
+
+########################################
+# snakeengine_t domain permissions
+########################################
+
+# Basic process permissions
+allow snakeengine_t self:process { signal sigkill sigstop signull };
+allow snakeengine_t self:fifo_file { open { getattr read write append ioctl lock } };
+allow snakeengine_t self:unix_stream_socket { { create { ioctl read getattr lock write setattr append bind connect getopt setopt shutdown } } listen accept };
+
+# Device access for /dev/snakedrv
+allow snakeengine_t snakedrv_device_t:chr_file { open read write ioctl };
+
+# Capability permissions required for debugging
+allow snakeengine_t self:capability { sys_ptrace sys_admin dac_read_search dac_override };
+
+# ptrace permissions for debugging other processes
+allow snakeengine_t domain:process ptrace;
+
+# Read /proc for process information
+
+#line 77
+	allow snakeengine_t proc_t:dir { getattr search open };
+#line 77
+	allow snakeengine_t proc_t:file { open { getattr read ioctl lock } };
+#line 77
+
+
+#line 78
+	allow snakeengine_t proc_t:dir { getattr search open };
+#line 78
+	allow snakeengine_t proc_t:dir { getattr search open read lock ioctl };
+#line 78
+
+
+# Access /proc/[pid]/mem for memory operations
+allow snakeengine_t domain:file { read write };
+
+# Read /proc/[pid]/maps, status, etc.
+allow snakeengine_t domain:dir { getattr search open read lock ioctl };
+allow snakeengine_t domain:lnk_file { getattr read };
+
+# Signal handling for process control
+allow snakeengine_t domain:process { signal sigkill sigstop };
+
+# Configuration files
+
+#line 91
+	allow snakeengine_t snakeengine_conf_t:dir { getattr search open };
+#line 91
+	allow snakeengine_t snakeengine_conf_t:file { open { getattr read ioctl lock } };
+#line 91
+
+
+# Runtime files (var/run)
+
+#line 94
+	allow snakeengine_t snakeengine_var_run_t:dir { open read getattr lock search ioctl add_name remove_name write };
+#line 94
+	allow snakeengine_t snakeengine_var_run_t:file { create open getattr setattr read write append rename link unlink ioctl lock watch watch_reads };
+#line 94
+
+
+#line 95
+	allow snakeengine_t snakeengine_var_run_t:dir { open read getattr lock search ioctl add_name remove_name write };
+#line 95
+	allow snakeengine_t snakeengine_var_run_t:dir { create open getattr setattr read write link unlink rename search add_name remove_name reparent rmdir lock ioctl watch watch_reads };
+#line 95
+
+# files_pid_filetrans not available on some policy versions; fallback to generic
+allow snakeengine_t snakeengine_var_run_t:dir { getattr create };
+allow snakeengine_t snakeengine_var_run_t:file { getattr create open };
+
+# Logging (without logging_log_filetrans for compatibility)
+
+#line 101
+	allow snakeengine_t snakeengine_log_t:dir { getattr search open };
+#line 101
+	allow snakeengine_t snakeengine_log_t:file { open lock ioctl { getattr append } };
+#line 101
+
+
+#line 102
+	allow snakeengine_t snakeengine_log_t:dir { getattr search open lock ioctl write add_name };
+#line 102
+	allow snakeengine_t snakeengine_log_t:file { getattr create open };
+#line 102
+
+
+# Temporary files
+allow snakeengine_t snakeengine_var_run_t:dir { getattr create };
+allow snakeengine_t snakeengine_var_run_t:file { getattr create open };
+
+# Network (deny by default for security)
+# Uncomment if network features are needed
+# sysnet_read_config(snakeengine_t)
+# corenet_tcp_connect_unreserved_ports(snakeengine_t)
+
+# X11/GUI (if needed)
+# Uncomment for GUI support
+# optional_policy(`
+#     xserver_user_x_domain_template(snakeengine, snakeengine_t, snakeengine_tmpfs_t)
+# ')
+
+########################################
+# Kernel module permissions
+########################################
+
+# Allow the kernel module to be loaded (requires root/admin)
+type snakedrv_ko_t;
+typeattribute snakedrv_ko_t file_type;
+
+# Allow loading the module
+allow snakeengine_t snakedrv_ko_t:system module_load;
+
+########################################
+# Device node creation
+########################################
+
+# udev rules for device creation
+type snakedrv_udev_rules_t;
+typeattribute snakedrv_udev_rules_t file_type;
+
+# Allow udev to create the device
+allow udev_t snakedrv_device_t:chr_file { create setattr };
+
+########################################
+# Boolean definitions
+########################################
+
+## Allow snakeengine to trace any process
+
+#line 146
+	bool snakeengine_can_trace_all true;
+#line 146
+
+
+## Allow snakeengine network access
+
+#line 149
+	bool snakeengine_can_network false;
+#line 149
+
+
+if (snakeengine_can_trace_all) {
+    allow snakeengine_t domain:process ptrace;
+    allow snakeengine_t domain:file { read write };
+}
+
+# if (snakeengine_can_network) {
+#    sysnet_read_config(snakeengine_t)
+#    corenet_tcp_sendrecv_generic_if(snakeengine_t)
+#    corenet_tcp_sendrecv_generic_node(snakeengine_t)
+# }

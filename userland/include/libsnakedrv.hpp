@@ -256,19 +256,59 @@ struct DriverInfo {
 using EventCallback = std::function<void(const DebugEvent&)>;
 
 /**
+ * Injection result structure
+ */
+struct InjectionResult {
+    bool success;
+    Address address;
+    int errorCode;
+    std::string errorMsg;
+};
+
+/**
+ * Extended process information
+ */
+struct ExtendedProcessInfo {
+    ProcessId pid;
+    ProcessId tgid;
+    ProcessId ppid;
+    uint64_t startTime;
+    uint64_t startCode;
+    uint64_t endCode;
+    uint64_t startStack;
+    std::string name;
+    std::string exePath;
+};
+
+/**
+ * Kernel thread information
+ */
+struct KernelThreadInfo {
+    ThreadId tid;
+    std::string name;
+    uint64_t state;
+    uint64_t kernelStack;
+};
+
+/**
  * Main driver interface class
  */
 class Driver {
 public:
+    // Nested type aliases for backward compatibility
+    using InjectionResult = ::snake::InjectionResult;
+    using ExtendedProcessInfo = ::snake::ExtendedProcessInfo;
+    using KernelThreadInfo = ::snake::KernelThreadInfo;
+
     Driver();
     ~Driver();
-    
+
     // Non-copyable, movable
     Driver(const Driver&) = delete;
     Driver& operator=(const Driver&) = delete;
     Driver(Driver&& other) noexcept;
     Driver& operator=(Driver&& other) noexcept;
-    
+
     /* Connection */
     bool open();
     void close();
@@ -344,8 +384,29 @@ public:
     void clearEventCallback();
     void startEventLoop();
     void stopEventLoop();
-    
+
+    /* Injection / Manual Mapping */
+    InjectionResult injectAlloc(ProcessId pid, size_t size, Protection prot);
+    InjectionResult injectProtect(ProcessId pid, Address address, size_t size, Protection prot);
+    InjectionResult injectThread(ProcessId pid, Address entryPoint, uint64_t argument);
+    InjectionResult manualMapLibrary(ProcessId pid, const std::string& libraryPath);
+    InjectionResult executeShellcode(ProcessId pid, const std::vector<uint8_t>& shellcode, uint64_t argument);
+
+    /* Process control */
+    bool suspendProcess(ProcessId pid);
+    bool resumeProcess(ProcessId pid);
+    bool killProcess(ProcessId pid);
+
+    /* Process information */
+    std::optional<ExtendedProcessInfo> getProcessInfo(ProcessId pid);
+    std::vector<KernelThreadInfo> getKernelThreads(ProcessId pid);
+
+    /* Internal - for Scanner access */
+    int getFd() const;
+
 private:
+    friend class Scanner;  // Allow Scanner to access internals
+
     class Impl;
     std::unique_ptr<Impl> impl_;
 };

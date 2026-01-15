@@ -1,133 +1,34 @@
 # SnakeEngine Driver (Linux)
 
-> Hardened memory-access and hardware-breakpoint driver for Linux, inspired by Cheat Engine’s DBK on Windows. Kernel module + modern C++ userland API.
+[![CI](https://github.com/CyberSnakeH/snakeengine-driver/actions/workflows/ci.yml/badge.svg)](https://github.com/CyberSnakeH/snakeengine-driver/actions/workflows/ci.yml)
+![Platform](https://img.shields.io/badge/platform-linux--x64-blue)
+![Kernel](https://img.shields.io/badge/kernel-6.1%2B-green)
+![License](https://img.shields.io/badge/license-GPLv2-red)
 
-🔗 **Wiki:** https://github.com/CyberSnakeH/snakeengine-driver/wiki  
-🛠️ **deploy.sh:** one-touch build/install/load  
-🛡️ **Security:** udev + AppArmor + SELinux (optional)  
-📦 **DKMS:** resilient across kernel updates
+Hardened memory-access and hardware-breakpoint driver for Linux, inspired by Cheat Engine's DBK on Windows. Kernel module + modern C++ userland API with a stealth-capable manual mapper. Research and educational use only.
 
 ## Highlights
-- **Kernel module (`kernel/snakedrv_main.c`)**: character device `/dev/snakedrv`, attach/detach target processes, forced read/write, region discovery, hardware breakpoints via perf/hw_breakpoint.
-- **Shared API (`userland/include/snakedrv.h`)**: common contract (IOCTLs, structs, error codes, versioning) used by kernel and userland.
-- **Userland library (`userland/src/libsnakedrv.cpp`, `include/libsnakedrv.hpp`)**: C++ wrapper that opens `/dev/snakedrv`, sends IOCTLs, and exposes a high-level API (attach/detach, read/write, query regions, set HW breakpoints, pop debug events).
-- **DKMS (`dkms/`)**: automatic rebuild on kernel updates.
-- **Security (`security/`)**: udev rules, AppArmor profile, optional SELinux policy.
-- **Automation (`deploy.sh`)**: single entry point for dependencies, build, install, load/unload, status, and cleanup.
+- Kernel driver (`kernel/`): `/dev/snakedrv`, attach/detach, forced read/write, memory region enumeration, hardware breakpoints, debug event queue, physical memory access, and VMA unlinking for stealth allocations.
+- Userland library (`userland/`): typed C/C++ API (`snakedrv.h`, `libsnakedrv.hpp`) plus manual ELF mapping/injection helpers and remote symbol resolution.
+- Memory scanner (`libsnakedrv_scanner`): Cheat Engine-style scans (exact/range/changed/pattern/float/string).
+- Automation (`deploy.sh`): deps, build, install, load/unload, status, cleanup, DKMS integration.
+- Security (`security/`): udev rules, AppArmor profile, optional SELinux policy, and Secure Boot signing helper (`sign-module.sh`).
 
-## Core Capabilities
-- Attach/detach target processes with refcounting and locking.
-- Read/write process memory via `access_process_vm`, with forced access and operation counters.
-- Enumerate memory regions (`snake_memory_region`) with protection, type, inode, and path metadata.
-- Hardware breakpoints DR0–DR3 (execute/write/read-write), lengths 1/2/4/8, using perf events; notify userland on hits.
-- Debug event queue exposed via IOCTL/poll: instruction address, accessed address, access type/size, DR slot, sequence.
-- Process/thread control (suspend/resume/kill/info/list-threads) through dedicated IOCTLs.
-- Module parameters (tunable or set via `/etc/modprobe.d/snakedrv.conf`):
-  - `max_attached_processes` (default: 16)
-  - `event_queue_size` (default: 256)
-  - `debug_level` (0–3)
+## Requirements
+- Linux kernel 6.1+ on x86_64 (stealth VMA unlinking relies on Maple Tree)
+- Kernel headers matching the running kernel
+- gcc/clang, make, cmake, libelf
+- DKMS recommended for kernel upgrades
+- Secure Boot (optional): `mokutil` and `sign-module.sh`
 
-## Source Layout
-- `kernel/`
-  - `snakedrv_main.c`: char device, IOCTL handling, attach management, breakpoints, event queue, memory ops.
-  - `Makefile`: builds `snakedrv.ko`.
-- `userland/`
-  - `include/snakedrv.h`: shared C API (structs, IOCTLs, errors).
-  - `include/libsnakedrv.hpp`: public C++ interface.
-  - `src/libsnakedrv.cpp`: implementation (device open, IOCTL wrappers, error mapping).
-  - `CMakeLists.txt`: optional CMake build.
-- `dkms/dkms.conf`: DKMS recipe for automatic rebuilds.
-- `security/`
-  - `99-snakedrv.rules`: udev rule, `snakeengine` group, device permissions.
-  - `snakeengine.apparmor`: AppArmor profile.
-  - `snakeengine.te` / `snakeengine.fc`: SELinux policy and file contexts.
-- `deploy.sh`: full automation (see below).
-- `test/`: legacy sample binaries (not built by default).
-
-## API / IOCTLs (high level)
-Defined in `userland/include/snakedrv.h` with magic `0x53`:
-- **Memory**: `snake_memory_op` (pid, addr, size, flags), `snake_memory_query` and `snake_memory_region`.
-- **Process/threads**: `snake_process_op`, `snake_process_info`, `snake_thread_info`.
-- **Breakpoints**: `snake_hw_breakpoint` (pid/tid, addr, type, len), release/list operations.
-- **Debug events**: `snake_debug_event` (instruction address, accessed address, access type/size, DR slot, sequence).
-`libsnakedrv` wraps these IOCTLs into methods (attach/detach, read/write, queryRegions, setHardwareBreakpoint, popEvents, etc.).
-
-## Security Hardening
-- **udev**: creates `/dev/snakedrv` with the `snakeengine` group and restricted permissions.
-- **AppArmor**: optional profile to confine device access and related binaries.
-- **SELinux**: optional policy (built if `selinux-policy-devel`/`checkpolicy` is available).
-- **Module defaults**: `/etc/modprobe.d/snakedrv.conf` generated by `deploy.sh` sets sane defaults for parameters.
-
-## What `deploy.sh` Does
-Primary commands: `deps`, `build`, `install`, `uninstall`, `load`, `unload`, `reload`, `status`, `clean`, `vm`, `help`.
-- **Options**: `--debug`, `--no-dkms`, `--no-selinux`, `--no-apparmor`, `--force`, `--prefix=PATH`, `-j/--jobs N`.
-- **Dependencies**: detects distro (Debian/Fedora/Arch) and installs headers, dkms, clang/llvm, cmake, libelf.
-- **Build**:
-  - `kernel/Makefile` → `snakedrv.ko` (DEBUG=1 when requested).
-  - `userland/` via CMake if present, otherwise manual compile to `libsnakedrv.so` and `libsnakedrv.a`.
-- **Install**:
-  - Module via DKMS (default) or direct copy to `/lib/modules/$(uname -r)/extra` + `depmod`.
-  - Library/headers to `${PREFIX}` (`/usr/local` by default) + `ldconfig`.
-  - udev rules + `snakeengine` group.
-  - `/etc/modprobe.d/snakedrv.conf` with `max_attached_processes`, `event_queue_size`, `debug_level`.
-  - SELinux (build/install `snakeengine.pp` if possible) and AppArmor (load profile).
-- **Module control**: `load` (insmod/modprobe), `unload`, `status` (lsmod, device presence, DKMS state, dmesg tail).
-- **Cleanup**: `clean` removes build artifacts; `uninstall` removes module, DKMS, libs, udev/AppArmor/SELinux artifacts, and refreshes caches.
-- **VM deploy**: `vm` rsyncs the folder to a VM.
-
-### Quick examples
+## Quick start
 ```bash
-# Full build
 ./deploy.sh build
-
-# Full install with DKMS, udev, AppArmor/SELinux (root)
 sudo ./deploy.sh install
-
-# Install without DKMS and without SELinux/AppArmor
-sudo ./deploy.sh install --no-dkms --no-selinux --no-apparmor
-
-# Load / unload
 sudo ./deploy.sh load
-sudo ./deploy.sh unload
-
-# Status
-./deploy.sh status
-
-# Full uninstall
-sudo ./deploy.sh uninstall
 ```
 
-## Developer Workflow
-1) `sudo ./deploy.sh deps` (install prerequisites).  
-2) `./deploy.sh build`.  
-3) `sudo ./deploy.sh install && sudo ./deploy.sh load`.  
-4) Link your app against `libsnakedrv` (include `libsnakedrv.hpp`, link `-lsnakedrv`), then use the API (attach, read/write, breakpoints, popEvents).  
-5) Debug: `./deploy.sh status` and `dmesg | grep snakedrv` (verbosity via `debug_level`).  
-
-## Best Practices
-- Restrict `/dev/snakedrv` to the `snakeengine` group only.
-- Enable SELinux/AppArmor where available to shrink the attack surface.
-- Avoid exposing the device on untrusted multi-user systems.
-- Keep `debug_level` at 1 in production (0 for silent, >1 for verbose).
-
-## Tree
-```
-kernel/               Kernel module (snakedrv_main.c, Makefile)
-userland/             C/C++ shared headers and library
-dkms/                 dkms.conf for automatic rebuild
-security/             udev + AppArmor + SELinux
-test/                 Legacy sample binaries (not built by default)
-deploy.sh             Full automation script
-```
-
-## C++ Usage (with `libsnakedrv`)
-
-Applications typically:
-1) Include `userland/include/libsnakedrv.hpp`.  
-2) Link against `libsnakedrv.so` (or the static `libsnakedrv.a`).  
-3) Use the C++ API to attach, read/write memory, and manage hardware breakpoints.
-
-Basic example:
+## C++ usage (libsnakedrv)
 ```cpp
 #include "libsnakedrv.hpp"
 #include <iostream>
@@ -176,26 +77,54 @@ int main() {
 }
 ```
 
-## Troubleshooting
-- **Module does not load**: check `dmesg | grep snakedrv`, ensure kernel headers match the running kernel, watch for secure boot/signing.
-- **Device missing**: trigger udev (`udevadm trigger`), verify `snakeengine` group/permissions.
-- **DKMS failures**: remove the old version (`dkms remove -m snakedrv -v 1.0.0 --all`), rerun `install`.
-- **SELinux/AppArmor blocks**: reinstall with `--no-selinux` or `--no-apparmor`, or adjust the policies appropriately.
-- **Kernel panics**: always develop/test in a VM or dedicated test box.
+## Documentation
+- `wiki/Home.md`
+- `wiki/Installation.md`
+- `wiki/Architecture.md`
+- `wiki/API.md`
+- `wiki/Security.md`
+- `wiki/Troubleshooting.md`
+- `wiki/FAQ.md`
+- `wiki/Contributing.md`
+- `wiki/Changelog.md`
 
-## Contributing
-Contributions are welcome! Please follow the existing coding style, document changes, and use pull requests.
+## Project layout
+```
+kernel/     Kernel driver (snakedrv.ko)
+userland/   C/C++ headers and library
+security/   udev + AppArmor + SELinux policies
+dkms/       DKMS config
+wiki/       Documentation pages
+```
 
+## Security notes
+- Runtime access is granted via the `snakeengine` group on `/dev/snakedrv`.
+- Keep `debug_level` low in production; increase only for debugging.
+- If Secure Boot blocks loading, sign the module with `./sign-module.sh`.
 
 ## Changelog
-* **1.1 (2025-12-06):**
-  * Fixed AppArmor policy errors and improved profile compatibility.
-  * Resolved objtool compilation errors (RETPOLINE/indirect calls) on certain Linux distributions (Ubuntu 24.04+, newer kernels).
-  * Added `sign-module.sh` script for Secure Boot support (MOK key generation and module signing).
+- 1.2 (2026-01-15)
+  - Stealth manual map injector pipeline (alloc, relocate, write, VMA unlinking).
+  - Improved remote symbol resolution and IFUNC handling for glibc.
+  - GitHub Actions CI build and release workflows.
+  - Documentation and wiki refresh.
+- 1.1 (2025-12-06)
+  - Fixed AppArmor policy errors and improved profile compatibility.
+  - Resolved objtool compilation errors (RETPOLINE/indirect calls) on newer kernels.
+  - Added `sign-module.sh` for Secure Boot module signing (MOK workflow).
+- 1.0 (2025-12-01)
+  - Initial public release inspired by Cheat Engine's DBK driver on Windows.
+  - Kernel module `snakedrv.ko` with privileged memory access and hardware breakpoints.
+  - Userland library `libsnakedrv` (C++ API).
+  - DKMS support for kernel updates.
+  - Security artifacts: udev, AppArmor, SELinux.
+  - Automation script `deploy.sh`.
 
-* **1.0 (2025-12-01):** Initial release of the `snakeengine-driver`.
-  * Kernel module for low-level system interaction.
-  * Userland library `libsnakedrv` for application integration.
-  * DKMS support for kernel update compatibility.
-  * Security policies (udev, AppArmor, SELinux).
-  * Automated deployment script (`deploy.sh`).
+## Contributing
+Contributions are welcome. Please follow `wiki/Contributing.md` and keep kernel changes minimal and auditable.
+
+## License
+GPL-2.0
+
+## Disclaimer
+This project is for educational and research use. Do not use it to violate game terms of service or local laws.

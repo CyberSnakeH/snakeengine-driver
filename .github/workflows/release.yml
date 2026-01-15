@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  userland_release:
+    name: Userland Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ make
+
+      - name: Build and package
+        run: |
+          cmake -S userland -B userland/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/dist
+          cmake --build userland/build -j2
+          cmake --install userland/build
+          tar -czf snakedrv-userland-${{ github.ref_name }}.tar.gz -C dist .
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: snakedrv-userland-${{ github.ref_name }}.tar.gz

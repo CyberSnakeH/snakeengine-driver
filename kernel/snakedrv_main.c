@@ -44,8 +44,21 @@
 #include <linux/thread_info.h>
 #include <asm/processor.h>
 
-/* Include shared header with userland */
+/* Include shared headers with userland */
 #include "../userland/include/snakedrv.h"
+#include "../userland/include/snakedrv_scanner.h"
+
+/* Include kernel headers */
+#include "snakedrv_backend.h"
+#include "snakedrv_scanner.h"
+#include "snakedrv_injector.h"
+
+/* Forward declarations for backend private data */
+struct process_context {
+    pid_t pid;
+    struct task_struct *task;
+    struct mm_struct *mm;
+};
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SnakeEngine Project");
@@ -135,8 +148,10 @@ struct attached_proc {
     struct list_head list;
     pid_t pid;
     struct file *owner;
-    struct task_struct *task;
-    struct mm_struct *mm;
+
+    /* Unified backend abstraction */
+    struct memory_backend *backend;
+
     struct bp_slot bp_slots[HBP_NUM];
     atomic_t refcount;
     uint64_t read_ops;
@@ -202,48 +217,32 @@ static void cleanup_breakpoints(struct attached_proc *p)
 static ssize_t do_read_memory(struct attached_proc *p, uint64_t addr,
                               void *buf, size_t len)
 {
-    struct task_struct *task;
     ssize_t ret;
-    
-    rcu_read_lock();
-    task = pid_task(find_vpid(p->pid), PIDTYPE_PID);
-    if (!task) {
-        rcu_read_unlock();
-        return -ESRCH;
-    }
-    get_task_struct(task);
-    rcu_read_unlock();
-    
-    ret = access_process_vm(task, addr, buf, len, FOLL_FORCE);
-    put_task_struct(task);
-    
+
+    if (!p->backend)
+        return -EINVAL;
+
+    ret = backend_read(p->backend, addr, buf, len);
+
     if (ret > 0)
         p->read_ops++;
-    
+
     return ret;
 }
 
 static ssize_t do_write_memory(struct attached_proc *p, uint64_t addr,
                                const void *buf, size_t len)
 {
-    struct task_struct *task;
     ssize_t ret;
-    
-    rcu_read_lock();
-    task = pid_task(find_vpid(p->pid), PIDTYPE_PID);
-    if (!task) {
-        rcu_read_unlock();
-        return -ESRCH;
-    }
-    get_task_struct(task);
-    rcu_read_unlock();
-    
-    ret = access_process_vm(task, addr, (void *)buf, len, FOLL_FORCE | FOLL_WRITE);
-    put_task_struct(task);
-    
+
+    if (!p->backend)
+        return -EINVAL;
+
+    ret = backend_write(p->backend, addr, buf, len);
+
     if (ret > 0)
         p->write_ops++;
-    
+
     return ret;
 }
 
@@ -452,12 +451,22 @@ static int do_virt_to_phys(struct attached_proc *p, struct snake_virt_to_phys *v
     struct mm_struct *mm;
     struct page *page = NULL;
     unsigned long addr = vtp->virt_address & PAGE_MASK;
+    struct process_context *proc_ctx;
     int ret = 0;
 
-    if (!p || !p->task)
+    if (!p || !p->backend)
         return -EINVAL;
 
-    mm = get_task_mm(p->task);
+    /* Only process backend supports VA->PA translation */
+    if (p->backend->type != BACKEND_TYPE_PROCESS)
+        return -ENOSYS;
+
+    /* Get process context from backend */
+    proc_ctx = (struct process_context *)p->backend->private_data;
+    if (!proc_ctx || !proc_ctx->task)
+        return -EINVAL;
+
+    mm = get_task_mm(proc_ctx->task);
     if (!mm)
         return -EINVAL;
 
@@ -1084,14 +1093,13 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
     case SNAKE_IOCTL_DEBUG_ATTACH: {
         struct snake_debug_attach attach;
         struct attached_proc *p;
-        struct task_struct *task;
-        struct mm_struct *mm;
-        
+        struct memory_backend *backend;
+
         if (copy_from_user(&attach, uarg, sizeof(attach)))
             return -EFAULT;
-        
+
         mutex_lock(&attach_mutex);
-        
+
         if (find_proc_locked(attach.pid)) {
             mutex_unlock(&attach_mutex);
             attach.result = SNAKEDRV_ERROR_BUSY;
@@ -1099,7 +1107,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
                 return -EFAULT;
             return -EBUSY;
         }
-        
+
         if (atomic_read(&attached_count) >= param_max_attached) {
             mutex_unlock(&attach_mutex);
             attach.result = SNAKEDRV_ERROR_BUSY;
@@ -1107,53 +1115,38 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
                 return -EFAULT;
             return -EBUSY;
         }
-        
-        rcu_read_lock();
-        task = pid_task(find_vpid(attach.pid), PIDTYPE_PID);
-        if (!task) {
-            rcu_read_unlock();
+
+        /* Create process backend */
+        backend = backend_create_process(attach.pid);
+        if (!backend) {
             mutex_unlock(&attach_mutex);
             attach.result = SNAKEDRV_ERROR_NO_PROCESS;
             if (copy_to_user(uarg, &attach, sizeof(attach)))
                 return -EFAULT;
             return -ESRCH;
         }
-        get_task_struct(task);
-        rcu_read_unlock();
-        
-        mm = get_task_mm(task);
-        if (!mm) {
-            put_task_struct(task);
-            mutex_unlock(&attach_mutex);
-            attach.result = SNAKEDRV_ERROR_NO_MEMORY;
-            if (copy_to_user(uarg, &attach, sizeof(attach)))
-                return -EFAULT;
-            return -EINVAL;
-        }
-        
+
         p = kzalloc(sizeof(*p), GFP_KERNEL);
         if (!p) {
-            mmput(mm);
-            put_task_struct(task);
+            backend_put(backend);
             mutex_unlock(&attach_mutex);
             return -ENOMEM;
         }
-        
+
         p->pid = attach.pid;
-        p->task = task;
-        p->mm = mm;
+        p->backend = backend;
         p->owner = file;
         atomic_set(&p->refcount, 1);
-        
+
         list_add(&p->list, &attached_list);
         atomic_inc(&attached_count);
         mutex_unlock(&attach_mutex);
-        
+
         attach.result = SNAKEDRV_SUCCESS;
         if (copy_to_user(uarg, &attach, sizeof(attach)))
             ret = -EFAULT;
-        
-        SDRV_INFO("Attached to PID %d\n", attach.pid);
+
+        SDRV_INFO("Attached to PID %d (Process Backend)\n", attach.pid);
         break;
     }
     
@@ -1171,21 +1164,22 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
                 list_del(&p->list);
                 atomic_dec(&attached_count);
                 mutex_unlock(&attach_mutex);
-                
+
                 cleanup_breakpoints(p);
-                if (p->mm)
-                    mmput(p->mm);
-                if (p->task)
-                    put_task_struct(p->task);
+
+                /* Release backend */
+                if (p->backend)
+                    backend_put(p->backend);
+
                 kfree(p);
-                
+
                 ctrl.result = SNAKEDRV_SUCCESS;
                 SDRV_INFO("Detached from PID %d\n", ctrl.pid);
             } else {
                 mutex_unlock(&attach_mutex);
                 ctrl.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             }
-            
+
             if (copy_to_user(uarg, &ctrl, sizeof(ctrl)))
                 ret = -EFAULT;
         } else if (ctrl.operation == SNAKE_DBG_CTRL_CONTINUE) {
@@ -1582,7 +1576,379 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         kvfree(events);
         break;
     }
-    
+
+    /* ========================================================================
+     * Scanner Operations
+     * ======================================================================== */
+
+    case SNAKE_IOCTL_SCAN_EXECUTE: {
+        struct snake_scan_execute exec;
+        struct attached_proc *p;
+        struct scan_params params;
+        struct scan_result_set *result_set;
+        ssize_t scan_result;
+
+        if (copy_from_user(&exec, uarg, sizeof(exec)))
+            return -EFAULT;
+
+        p = get_proc(exec.params.pid);
+        if (!p) {
+            exec.result = -ESRCH;
+            if (copy_to_user(uarg, &exec, sizeof(exec)))
+                return -EFAULT;
+            return -ESRCH;
+        }
+
+        /* Convert userland params to kernel params */
+        params.scan_type = exec.params.scan_type;
+        params.start_address = exec.params.start_address;
+        params.end_address = exec.params.end_address;
+        params.search_value = exec.params.search_value;
+        params.value_size = exec.params.value_type;
+        params.aligned = exec.params.aligned;
+        params.parallel = exec.params.parallel;
+        params.num_threads = exec.params.num_threads;
+
+        /* Create result set for scan results */
+        result_set = scanner_create_result_set(exec.params.max_results > 0 ?
+                                               exec.params.max_results : 10000);
+        if (!result_set) {
+            put_proc(p);
+            exec.result = -ENOMEM;
+            if (copy_to_user(uarg, &exec, sizeof(exec)))
+                return -EFAULT;
+            return -ENOMEM;
+        }
+
+        /* If no address range specified, scan each VMA individually (FirstScan only) */
+        if (params.start_address == 0 && params.end_address == 0 &&
+            p->backend->type == BACKEND_TYPE_PROCESS &&
+            exec.params.scan_type == SCAN_TYPE_EXACT_VALUE &&
+            exec.params.result_set_id == 0) {
+            struct process_context *ctx;
+            struct mm_struct *mm;
+            struct vm_area_struct *vma;
+            ssize_t total_matches = 0;
+
+            /* Safety checks */
+            if (!p->backend->private_data) {
+                pr_err("snakedrv: Backend has no private data\n");
+                scan_result = -EINVAL;
+                goto skip_vma_scan;
+            }
+
+            ctx = (struct process_context *)p->backend->private_data;
+            if (!ctx->mm) {
+                pr_err("snakedrv: Process has no mm_struct\n");
+                scan_result = -EINVAL;
+                goto skip_vma_scan;
+            }
+
+            mm = ctx->mm;
+            VMA_ITERATOR(vmi, mm, 0);
+
+            if (mmap_read_lock_killable(mm)) {
+                scanner_free_result_set(result_set);
+                put_proc(p);
+                exec.result = -EINTR;
+                if (copy_to_user(uarg, &exec, sizeof(exec)))
+                    return -EFAULT;
+                return -EINTR;
+            }
+
+            pr_info("snakedrv: Scanning all readable VMAs for PID %d\n", exec.params.pid);
+
+            /* Scan each readable VMA individually */
+            for_each_vma(vmi, vma) {
+                /* Safety check */
+                if (!vma) {
+                    pr_warn("snakedrv: NULL VMA\n");
+                    break;
+                }
+
+                if (!(vma->vm_flags & VM_READ))
+                    continue;
+
+                /* Skip if result set is full */
+                if (result_set->count >= result_set->max_results) {
+                    pr_debug("snakedrv: Result set full\n");
+                    break;
+                }
+
+                /* Validate VMA range */
+                if (vma->vm_start >= vma->vm_end)
+                    continue;
+
+                /* Setup params for this VMA */
+                params.start_address = vma->vm_start;
+                params.end_address = vma->vm_end;
+
+                pr_debug("snakedrv: Scanning VMA 0x%llx - 0x%llx\n",
+                        params.start_address, params.end_address);
+
+                /* Execute scan on this VMA */
+                scan_result = scanner_exact_value(p->backend, &params, result_set);
+
+                if (scan_result < 0) {
+                    pr_debug("snakedrv: Scan failed for VMA: %zd\n", scan_result);
+                    continue;
+                }
+
+                total_matches += scan_result;
+            }
+            mmap_read_unlock(mm);
+
+            scan_result = total_matches;
+            pr_info("snakedrv: VMA scan complete: %zd matches\n", total_matches);
+
+skip_vma_scan:
+            /* Fall through to normal scan if VMA scan was skipped */
+            ;
+        } else {
+            /* Execute the appropriate scan type with explicit range */
+            switch (exec.params.scan_type) {
+            case SCAN_TYPE_EXACT_VALUE:
+                /* Check if this is a rescan (result_set_id provided) */
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_exact_value_rescan(p->backend, prev_set, result_set,
+                                                                 params.search_value, params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    /* FirstScan with explicit range */
+                    scan_result = scanner_exact_value(p->backend, &params, result_set);
+                }
+                break;
+            case SCAN_TYPE_CHANGED_VALUE:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_changed_values(p->backend, prev_set, result_set, params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_UNCHANGED_VALUE:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_unchanged_values(p->backend, prev_set, result_set, params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_INCREASED_VALUE:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_increased_values(p->backend, prev_set, result_set, params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_DECREASED_VALUE:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_decreased_values(p->backend, prev_set, result_set, params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_INCREASED_BY:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_increased_by(p->backend, prev_set, result_set,
+                                                           exec.params.search_value,
+                                                           params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_DECREASED_BY:
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_decreased_by(p->backend, prev_set, result_set,
+                                                           exec.params.search_value,
+                                                           params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -EINVAL;
+                }
+                break;
+            case SCAN_TYPE_RANGE:
+                /* Value between min and max */
+                if (exec.params.result_set_id > 0) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
+                    if (prev_set) {
+                        scan_result = scanner_value_between(p->backend, prev_set, result_set,
+                                                            exec.params.search_value,
+                                                            exec.params.search_value_2,
+                                                            params.value_size);
+                        scanner_cache_put(prev_set);
+                    } else {
+                        scan_result = -EINVAL;
+                    }
+                } else {
+                    scan_result = -ENOSYS;  /* Range FirstScan not implemented */
+                }
+                break;
+            default:
+                /* Unsupported scan type */
+                pr_warn("snakedrv: Unsupported scan type %u\n", exec.params.scan_type);
+                scan_result = -ENOTTY;
+                break;
+            }
+        }
+
+        put_proc(p);
+
+        if (scan_result < 0) {
+            scanner_free_result_set(result_set);
+            exec.result = (int)scan_result;
+            if (copy_to_user(uarg, &exec, sizeof(exec)))
+                return -EFAULT;
+            return (int)scan_result;
+        }
+
+        /* Copy results to userspace */
+        exec.total_matches = result_set->count;
+        exec.results_count = min((uint32_t)result_set->count, exec.results_capacity);
+
+        if (exec.results_count > 0 && exec.results) {
+            /* Convert kernel scan_result to userland snake_scan_result */
+            struct snake_scan_result *user_results = kvmalloc(
+                exec.results_count * sizeof(struct snake_scan_result), GFP_KERNEL);
+            if (user_results) {
+                uint32_t i;
+                for (i = 0; i < exec.results_count; i++) {
+                    user_results[i].address = result_set->results[i].address;
+                    user_results[i].value = result_set->results[i].value;
+                    user_results[i].size = params.value_size;
+                    user_results[i].region_index = 0;
+                }
+
+                if (copy_to_user((void __user *)exec.results, user_results,
+                                exec.results_count * sizeof(struct snake_scan_result))) {
+                    kvfree(user_results);
+                    scanner_free_result_set(result_set);
+                    return -EFAULT;
+                }
+                kvfree(user_results);
+            }
+        }
+
+        /* Cache the result set for potential rescans */
+        exec.result_set_id = scanner_cache_add(result_set);
+        exec.result = 0;
+
+        if (copy_to_user(uarg, &exec, sizeof(exec)))
+            ret = -EFAULT;
+
+        break;
+    }
+
+    case SNAKE_IOCTL_SCAN_FREE_RESULTS: {
+        uint32_t result_set_id;
+
+        if (copy_from_user(&result_set_id, uarg, sizeof(result_set_id)))
+            return -EFAULT;
+
+        if (result_set_id > 0)
+            scanner_cache_remove(result_set_id);
+
+        break;
+    }
+
+    /* ========================================================================
+     * Injection Operations (Manual Mapping)
+     * ======================================================================== */
+
+    case SNAKE_IOCTL_INJECT_ALLOC: {
+        struct snake_inject_alloc alloc;
+
+        if (copy_from_user(&alloc, uarg, sizeof(alloc)))
+            return -EFAULT;
+
+        ret = injector_allocate(&alloc);
+        alloc.result = ret;
+
+        if (copy_to_user(uarg, &alloc, sizeof(alloc)))
+            return -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_INJECT_PROTECT: {
+        struct snake_inject_protect prot;
+
+        if (copy_from_user(&prot, uarg, sizeof(prot)))
+            return -EFAULT;
+
+        ret = injector_protect(&prot);
+        prot.result = ret;
+
+        if (copy_to_user(uarg, &prot, sizeof(prot)))
+            return -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_INJECT_THREAD: {
+        struct snake_inject_thread thread;
+
+        if (copy_from_user(&thread, uarg, sizeof(thread)))
+            return -EFAULT;
+
+        ret = injector_create_thread(&thread);
+        thread.result = ret;
+
+        if (copy_to_user(uarg, &thread, sizeof(thread)))
+            return -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_INJECT_STEALTH: {
+        struct snake_inject_protect prot;
+
+        if (copy_from_user(&prot, uarg, sizeof(prot)))
+            return -EFAULT;
+
+        ret = injector_apply_stealth(&prot);
+        prot.result = ret;
+
+        if (copy_to_user(uarg, &prot, sizeof(prot)))
+            return -EFAULT;
+        break;
+    }
+
     default:
         SDRV_ERR("Unknown IOCTL: 0x%x\n", cmd);
         ret = -ENOTTY;
@@ -1622,12 +1988,13 @@ static int snakedrv_release(struct inode *inode, struct file *file)
         
         if (!victim)
             break;
-            
+
         cleanup_breakpoints(victim);
-        if (victim->mm)
-            mmput(victim->mm);
-        if (victim->task)
-            put_task_struct(victim->task);
+
+        /* Release backend */
+        if (victim->backend)
+            backend_put(victim->backend);
+
         kfree(victim);
         SDRV_INFO("Auto-detached from PID %d on close\n", victim->pid);
     }
@@ -1689,11 +2056,21 @@ static int __init snakedrv_init(void)
         SDRV_ERR("Failed to create device: %d\n", ret);
         goto err_device;
     }
-    
+
+    /* Initialize scanner subsystem */
+    ret = snakedrv_scanner_init();
+    if (ret < 0) {
+        SDRV_ERR("Failed to initialize scanner: %d\n", ret);
+        goto err_scanner;
+    }
+
     SDRV_INFO("Driver loaded: /dev/%s (major=%d)\n",
               SNAKEDRV_DEVICE_NAME, MAJOR(snakedrv_devnum));
-    
+
     return 0;
+
+err_scanner:
+    device_destroy(snakedrv_class, snakedrv_devnum);
 
 err_device:
     class_destroy(snakedrv_class);
@@ -1708,18 +2085,19 @@ static void __exit snakedrv_exit(void)
 {
     struct attached_proc *p, *tmp;
     struct event_entry *e, *etmp;
-    
+
     SDRV_INFO("Unloading driver\n");
-    
+
     /* Cleanup all attached processes */
     mutex_lock(&attach_mutex);
     list_for_each_entry_safe(p, tmp, &attached_list, list) {
         list_del(&p->list);
         cleanup_breakpoints(p);
-        if (p->mm)
-            mmput(p->mm);
-        if (p->task)
-            put_task_struct(p->task);
+
+        /* Release backend */
+        if (p->backend)
+            backend_put(p->backend);
+
         kfree(p);
     }
     mutex_unlock(&attach_mutex);
@@ -1731,13 +2109,16 @@ static void __exit snakedrv_exit(void)
         kfree(e);
     }
     spin_unlock(&event_lock);
-    
+
+    /* Cleanup scanner subsystem */
+    snakedrv_scanner_cleanup();
+
     /* Destroy device */
     device_destroy(snakedrv_class, snakedrv_devnum);
     class_destroy(snakedrv_class);
     cdev_del(&snakedrv_cdev);
     unregister_chrdev_region(snakedrv_devnum, 1);
-    
+
     SDRV_INFO("Driver unloaded\n");
 }
 

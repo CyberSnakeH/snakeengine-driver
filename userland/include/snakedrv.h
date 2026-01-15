@@ -93,6 +93,7 @@ struct snake_memory_region {
 #define SNAKE_PROT_EXEC             (1 << 2)
 #define SNAKE_PROT_SHARED           (1 << 3)
 #define SNAKE_PROT_PRIVATE          (1 << 4)
+#define SNAKE_PROT_STEALTH          (1 << 5)    /* Remove from /proc/maps */
 
 /* Region types */
 #define SNAKE_REGION_UNKNOWN        0
@@ -442,6 +443,51 @@ struct snake_driver_info {
 
 /* Driver info */
 #define SNAKE_IOCTL_GET_INFO        _IOR(SNAKEDRV_IOCTL_MAGIC, 0x40, struct snake_driver_info)
+
+/* ============================================================================
+ * Injection Operations (Manual Mapping)
+ * ============================================================================ */
+
+/**
+ * @struct snake_inject_alloc
+ * @brief Allocate memory in target process (stealth)
+ */
+struct snake_inject_alloc {
+    pid_t           pid;            /* Target process ID */
+    uint64_t        size;           /* Size to allocate */
+    uint32_t        protection;     /* Initial protection (usually RW) */
+    uint64_t        address;        /* Output: Allocated address */
+    int32_t         result;         /* Result code */
+} __attribute__((packed));
+
+/**
+ * @struct snake_inject_protect
+ * @brief Change memory protection (e.g., RW -> RX)
+ */
+struct snake_inject_protect {
+    pid_t           pid;            /* Target process ID */
+    uint64_t        address;        /* Address to protect */
+    uint64_t        size;           /* Size of region */
+    uint32_t        protection;     /* New protection flags */
+    int32_t         result;         /* Result code */
+} __attribute__((packed));
+
+/**
+ * @struct snake_inject_thread
+ * @brief Create a remote thread to execute code
+ */
+struct snake_inject_thread {
+    pid_t           pid;            /* Target process ID */
+    uint64_t        start_address;  /* Code entry point */
+    uint64_t        argument;       /* Argument for function (RDI) */
+    int32_t         result;         /* Result code */
+} __attribute__((packed));
+
+/* Injection operations */
+#define SNAKE_IOCTL_INJECT_ALLOC    _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x60, struct snake_inject_alloc)
+#define SNAKE_IOCTL_INJECT_PROTECT  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x61, struct snake_inject_protect)
+#define SNAKE_IOCTL_INJECT_THREAD   _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x62, struct snake_inject_thread)
+#define SNAKE_IOCTL_INJECT_STEALTH  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x63, struct snake_inject_protect)
 
 /* ============================================================================
  * Netlink Protocol for Async Events
