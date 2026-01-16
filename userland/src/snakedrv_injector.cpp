@@ -34,8 +34,16 @@ namespace snakedrv {
  * Remote Process Reader Implementation
  * Handles communication with the driver and caching of remote module info.
  */
+/**
+ * class DriverRemoteReader - RemoteReader implementation backed by driver IOCTLs
+ */
 class DriverRemoteReader : public RemoteReader {
 public:
+    /**
+     * DriverRemoteReader - Attach and prepare module cache
+     * @fd: Driver file descriptor
+     * @pid: Target process ID
+     */
     DriverRemoteReader(int fd, pid_t pid) : driver_fd(fd), target_pid(pid) {
         // Must attach to process to perform read operations
         struct snake_debug_attach attach = {0};
@@ -53,6 +61,13 @@ public:
         refresh_module_list();
     }
 
+    /**
+     * read - Read remote memory in driver-sized chunks
+     * @address: Remote address
+     * @buffer: Local buffer
+     * @size: Number of bytes to read
+     * @return true on success
+     */
     bool read(uint64_t address, void* buffer, size_t size) override {
         const size_t MAX_CHUNK = 1024 * 1024; // 1MB limit in driver
         uint8_t* ptr = (uint8_t*)buffer;
@@ -87,6 +102,11 @@ public:
         return true;
     }
 
+    /**
+     * get_module_base - Resolve a module base by name substring
+     * @module_name: Module name substring to match
+     * @return Base address or 0 if not found
+     */
     uint64_t get_module_base(const std::string& module_name) override {
         // Simple heuristic: name contains the requested string
         for (const auto& mod : modules) {
@@ -97,9 +117,13 @@ public:
         return 0;
     }
 
-    /*
-     * Ultra-Optimized Symbol Resolver
-     * Downloads the remote Export Directory once per module and performs lookups locally.
+    /**
+     * resolve_symbol_in_remote_modules - Resolve a symbol across loaded modules
+     *
+     * This uses a cached export table per module to avoid repeated IOCTL reads.
+     *
+     * @symbol_name: Symbol to resolve
+     * @return Remote address or 0 if not found
      */
     uint64_t resolve_symbol_in_remote_modules(const std::string& symbol_name) {
         // Common libraries to search in order
@@ -163,6 +187,11 @@ private:
     int driver_fd;
     pid_t target_pid;
 
+    /**
+     * struct ModuleInfo - Cached remote module metadata
+     * @base: Base address
+     * @path: Filesystem path
+     */
     struct ModuleInfo {
         uint64_t base;
         std::string path;
@@ -172,6 +201,9 @@ private:
     // Cache: Module Base -> { Symbol Name -> Offset }
     std::map<uint64_t, std::map<std::string, uint64_t>> export_cache;
 
+    /**
+     * refresh_module_list - Parse /proc/<pid>/maps and cache module bases
+     */
     void refresh_module_list() {
         modules.clear();
         std::string maps_path = "/proc/" + std::to_string(target_pid) + "/maps";
@@ -211,6 +243,11 @@ private:
         }
     }
 
+    /**
+     * cache_exports - Cache export symbols for a module base
+     * @base: Module base address
+     * @name: Module path or name for logging
+     */
     void cache_exports(uint64_t base, const std::string& name) {
         // 1. Read ELF Header
         Elf64_Ehdr ehdr;
@@ -361,10 +398,19 @@ private:
 /*
  * ElfParser Implementation
  */
+/**
+ * ElfParser::ElfParser - Construct parser for a local ELF path
+ */
 ElfParser::ElfParser(const std::string& path) : file_path(path), ehdr(nullptr), phdr(nullptr) {}
 
+/**
+ * ElfParser::~ElfParser - Default destructor
+ */
 ElfParser::~ElfParser() {}
 
+/**
+ * ElfParser::load_file - Read file into memory and validate headers
+ */
 bool ElfParser::load_file() {
     std::ifstream file(file_path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) return false;
@@ -383,6 +429,9 @@ bool ElfParser::load_file() {
     return true;
 }
 
+/**
+ * ElfParser::parse - Parse the ELF and build the local image
+ */
 bool ElfParser::parse() {
     if (!load_file()) return false;
     
@@ -424,6 +473,9 @@ bool ElfParser::parse() {
     return true;
 }
 
+/**
+ * ElfParser::collect_imports - Collect external relocations
+ */
 void ElfParser::collect_imports() {
     // Helper to find segment pointer
     auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
@@ -530,6 +582,9 @@ void ElfParser::collect_imports() {
     }
 }
 
+/**
+ * ElfParser::relocate_base - Apply base relocations
+ */
 bool ElfParser::relocate_base(uint64_t target_base) {
     // Helper to find segment pointer
     auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
@@ -609,6 +664,9 @@ bool ElfParser::relocate_base(uint64_t target_base) {
     return true; 
 }
 
+/**
+ * ElfParser::resolve_imports - Resolve external imports using remote reader
+ */
 bool ElfParser::resolve_imports(RemoteReader& reader) {
     DriverRemoteReader* driver_reader = dynamic_cast<DriverRemoteReader*>(&reader);
     if (!driver_reader) return false;
@@ -651,6 +709,9 @@ bool ElfParser::resolve_imports(RemoteReader& reader) {
     return true;
 }
 
+/**
+ * ElfParser::get_symbol_offset - Lookup a symbol offset in the local image
+ */
 uint64_t ElfParser::get_symbol_offset(const std::string& name) {
     auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
         for(const auto& seg : image.segments) {
@@ -705,10 +766,23 @@ uint64_t ElfParser::get_symbol_offset(const std::string& name) {
     return 0;
 }
 
+/**
+ * class ManualMapper - Orchestrates manual mapping and remote thread start
+ */
 class ManualMapper {
 public:
+    /**
+     * ManualMapper - Bind to driver FD and target PID
+     * @fd: Driver file descriptor
+     * @pid: Target process ID
+     */
     ManualMapper(int fd, pid_t pid) : driver_fd(fd), target_pid(pid) {}
     
+    /**
+     * inject - Manual map an ELF shared object into the target process
+     * @library_path: Path to the shared object
+     * @return true on success
+     */
     bool inject(const std::string& library_path) {
         ElfParser parser(library_path);
         if (!parser.parse()) {
@@ -825,6 +899,13 @@ private:
 } // namespace snakedrv
 
 extern "C" {
+    /**
+     * snake_inject_library - C ABI wrapper for ManualMapper::inject
+     * @fd: Driver file descriptor
+     * @pid: Target PID
+     * @path: Path to the shared object
+     * @return 0 on success, -1 on failure
+     */
     int snake_inject_library(int fd, int pid, const char* path) {
         snakedrv::ManualMapper mapper(fd, pid);
         return mapper.inject(path) ? 0 : -1;

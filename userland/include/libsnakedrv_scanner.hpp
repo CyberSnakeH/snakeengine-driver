@@ -30,7 +30,7 @@ class Driver;
  * ============================================================================ */
 
 /**
- * Scan type enumeration
+ * enum class ScanType - High-level scan strategy
  */
 enum class ScanType {
     ExactValue     = SCAN_TYPE_EXACT_VALUE,
@@ -47,7 +47,7 @@ enum class ScanType {
 };
 
 /**
- * Value type for scanning
+ * enum class ValueType - Primitive value types for scans
  */
 enum class ValueType {
     Int8   = SCAN_VALUE_INT8,
@@ -60,7 +60,7 @@ enum class ValueType {
 };
 
 /**
- * Backend type
+ * enum class BackendType - Scanner backend selection
  */
 enum class BackendType {
     Auto    = BACKEND_AUTO,
@@ -72,7 +72,11 @@ enum class BackendType {
  * ============================================================================ */
 
 /**
- * Single scan result
+ * struct ScanResult - Single scan hit
+ * @address: Address where the match was found
+ * @value: Raw value (truncated or packed)
+ * @size: Size of the matched value in bytes
+ * @regionIndex: Index of the region that contains the address
  */
 struct ScanResult {
     uint64_t address;
@@ -80,7 +84,10 @@ struct ScanResult {
     uint32_t size;
     uint32_t regionIndex;
 
-    // Helper to read value as specific type
+    /**
+     * as - Interpret the raw value as a specific type
+     * @return Value cast to T
+     */
     template<typename T>
     T as() const {
         static_assert(sizeof(T) <= sizeof(value), "Type too large");
@@ -89,7 +96,11 @@ struct ScanResult {
 };
 
 /**
- * Scan statistics
+ * struct ScanStats - Statistics for the most recent scan
+ * @totalMatches: Total matches found in memory
+ * @returnedResults: Results returned to user (may be limited)
+ * @bytesScanned: Total bytes scanned
+ * @timeUs: Scan time in microseconds
  */
 struct ScanStats {
     uint32_t totalMatches;    // Total matches found
@@ -97,12 +108,19 @@ struct ScanStats {
     uint64_t bytesScanned;    // Bytes scanned
     uint64_t timeUs;          // Scan time in microseconds
 
-    // Computed values
+    /**
+     * throughputMBps - Compute throughput from bytes/time
+     * @return MB/s throughput
+     */
     double throughputMBps() const {
         if (timeUs == 0) return 0.0;
         return (bytesScanned / 1024.0 / 1024.0) / (timeUs / 1000000.0);
     }
 
+    /**
+     * matchRate - Compute matches per second
+     * @return Matches per second
+     */
     double matchRate() const {
         if (timeUs == 0) return 0.0;
         return totalMatches / (timeUs / 1000000.0);
@@ -110,7 +128,12 @@ struct ScanStats {
 };
 
 /**
- * Backend information
+ * struct BackendInfo - Active backend capabilities
+ * @type: Backend type in use
+ * @name: Human-readable backend name
+ * @supportsHugePages: Whether huge pages are supported
+ * @supportsParallel: Whether parallel scanning is supported
+ * @pageSize: Backend page size
  */
 struct BackendInfo {
     BackendType type;
@@ -121,7 +144,13 @@ struct BackendInfo {
 };
 
 /**
- * Performance statistics
+ * struct PerformanceStats - Aggregated scanner performance stats
+ * @totalScans/totalBytes/totalMatches/totalTimeNs: Aggregates
+ * @avgLatencyUs/minLatencyUs/maxLatencyUs: Latency statistics
+ * @throughputMBps/matchesPerSec: Throughput statistics
+ * @cacheHitRate/parallelRatio: Percent metrics (0-100)
+ * @hugePageScans: Count of huge page scans
+ * @allocatedBytes/peakBytes: Memory usage stats
  */
 struct PerformanceStats {
     uint64_t totalScans;
@@ -143,13 +172,26 @@ struct PerformanceStats {
     uint64_t allocatedBytes;
     uint64_t peakBytes;
 
-    // Helper methods
+    /**
+     * avgThroughput - Return throughput in MB/s as double
+     * @return Average throughput
+     */
     double avgThroughput() const { return static_cast<double>(throughputMBps); }
+    /**
+     * cacheEfficiency - Return cache hit rate as ratio
+     * @return Cache efficiency in [0.0, 1.0]
+     */
     double cacheEfficiency() const { return cacheHitRate / 100.0; }
 };
 
 /**
- * Global scan options
+ * struct ScanOptions - Global scanner defaults
+ * @enableParallel: Enable parallel scanning by default
+ * @enableBloom: Enable Bloom filter for rescans
+ * @enablePrefetch: Enable cache prefetching
+ * @enableHugePages: Enable huge page detection
+ * @defaultThreads: Default thread count (0 = auto)
+ * @bloomFpr: Bloom filter false positive rate
  */
 struct ScanOptions {
     bool enableParallel = true;
@@ -165,15 +207,35 @@ struct ScanOptions {
  * ============================================================================ */
 
 /**
- * Handle to a result set (for rescans)
+ * class ResultSet - Handle to a server-side result set
  */
 class ResultSet {
 public:
+    /**
+     * ResultSet - Construct an invalid handle
+     */
     ResultSet() = default;
+    /**
+     * ResultSet - Construct a handle with ID and count
+     * @id: Result set ID
+     * @count: Number of results stored
+     */
     ResultSet(uint32_t id, uint32_t count) : id_(id), count_(count) {}
 
+    /**
+     * id - Return result set ID
+     * @return Result set ID
+     */
     uint32_t id() const { return id_; }
+    /**
+     * count - Return number of results in the set
+     * @return Result count
+     */
     uint32_t count() const { return count_; }
+    /**
+     * isValid - Check if the handle refers to a valid set
+     * @return true if valid
+     */
     bool isValid() const { return id_ > 0; }
 
 private:
@@ -187,9 +249,9 @@ private:
  * ============================================================================ */
 
 /**
- * Memory scanner interface
+ * class Scanner - Memory scanning interface
  *
- * Provides CheatEngine-like memory scanning capabilities.
+ * Provides CheatEngine-like scanning capabilities.
  * Requires an attached Driver instance.
  *
  * Example:
@@ -205,7 +267,14 @@ public:
      * Construct scanner for attached driver
      * @param driver Driver instance (must be attached to a process)
      */
+    /**
+     * Scanner - Construct a scanner bound to a Driver
+     * @driver: Driver instance (must be attached)
+     */
     explicit Scanner(Driver& driver);
+    /**
+     * ~Scanner - Cleanup
+     */
     ~Scanner();
 
     /* Basic scans */
@@ -360,6 +429,10 @@ public:
     /**
      * Get last scan statistics
      */
+    /**
+     * lastScanStats - Get statistics from the most recent scan
+     * @return ScanStats reference
+     */
     const ScanStats& lastScanStats() const { return lastStats_; }
 
     /* Result set management */
@@ -398,7 +471,18 @@ private:
     ResultSet lastResultSet_;
 
     // Internal methods
+    /**
+     * executeScan - Internal scan execution helper
+     * @params: Fully populated scan parameters
+     * @return Vector of scan results
+     */
     std::vector<ScanResult> executeScan(const snake_scan_params& params);
+    /**
+     * makeParams - Build base scan parameters for a given scan type
+     * @type: Scan type
+     * @valueType: Value type
+     * @return Initialized parameter struct
+     */
     snake_scan_params makeParams(ScanType type, ValueType valueType) const;
 };
 
@@ -407,32 +491,44 @@ private:
  * ============================================================================ */
 
 /**
- * Get current backend information
+ * getBackendInfo - Query active backend information
+ * @driver: Driver instance
+ * @return BackendInfo
  */
 BackendInfo getBackendInfo(Driver& driver);
 
 /**
- * Set active backend
+ * setBackend - Select backend type
+ * @driver: Driver instance
+ * @type: Backend type
+ * @return true on success
  */
 bool setBackend(Driver& driver, BackendType type);
 
 /**
- * Get performance statistics
+ * getPerformanceStats - Query performance statistics
+ * @driver: Driver instance
+ * @return PerformanceStats
  */
 PerformanceStats getPerformanceStats(Driver& driver);
 
 /**
- * Reset performance statistics
+ * resetPerformanceStats - Reset performance counters
+ * @driver: Driver instance
  */
 void resetPerformanceStats(Driver& driver);
 
 /**
- * Get global scan options
+ * getScanOptions - Query global scan defaults
+ * @driver: Driver instance
+ * @return ScanOptions
  */
 ScanOptions getScanOptions(Driver& driver);
 
 /**
- * Set global scan options
+ * setScanOptions - Update global scan defaults
+ * @driver: Driver instance
+ * @options: Options to apply
  */
 void setScanOptions(Driver& driver, const ScanOptions& options);
 
@@ -440,6 +536,13 @@ void setScanOptions(Driver& driver, const ScanOptions& options);
  * Template Implementations
  * ============================================================================ */
 
+/**
+ * Scanner::exactValue - Template implementation for exact value scans
+ * @value: Value to search for
+ * @aligned: Only scan aligned addresses
+ * @writableOnly: Only scan writable memory
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::exactValue(T value, bool aligned, bool writableOnly) {
     snake_scan_params params = makeParams(ScanType::ExactValue,
@@ -451,6 +554,13 @@ std::vector<ScanResult> Scanner::exactValue(T value, bool aligned, bool writable
     return executeScan(params);
 }
 
+/**
+ * Scanner::rangeValue - Template implementation for range scans
+ * @min: Minimum value (inclusive)
+ * @max: Maximum value (inclusive)
+ * @aligned: Only scan aligned addresses
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::rangeValue(T min, T max, bool aligned) {
     snake_scan_params params = makeParams(ScanType::Range,
@@ -462,6 +572,12 @@ std::vector<ScanResult> Scanner::rangeValue(T min, T max, bool aligned) {
     return executeScan(params);
 }
 
+/**
+ * Scanner::exactValueRescan - Template implementation for exact rescans
+ * @previousResults: Result set from previous scan
+ * @value: Value to search for
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::exactValueRescan(const ResultSet& previousResults, T value) {
     if (!previousResults.isValid()) {
@@ -476,6 +592,13 @@ std::vector<ScanResult> Scanner::exactValueRescan(const ResultSet& previousResul
     return executeScan(params);
 }
 
+/**
+ * Scanner::valueBetween - Template implementation for range rescans
+ * @previousResults: Result set from previous scan
+ * @min: Minimum value (inclusive)
+ * @max: Maximum value (inclusive)
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::valueBetween(const ResultSet& previousResults, T min, T max) {
     if (!previousResults.isValid()) {
@@ -491,6 +614,12 @@ std::vector<ScanResult> Scanner::valueBetween(const ResultSet& previousResults, 
     return executeScan(params);
 }
 
+/**
+ * Scanner::increasedBy - Template implementation for increased-by rescans
+ * @previousResults: Result set from previous scan
+ * @delta: Increase amount
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::increasedBy(const ResultSet& previousResults, T delta) {
     if (!previousResults.isValid()) {
@@ -505,6 +634,12 @@ std::vector<ScanResult> Scanner::increasedBy(const ResultSet& previousResults, T
     return executeScan(params);
 }
 
+/**
+ * Scanner::decreasedBy - Template implementation for decreased-by rescans
+ * @previousResults: Result set from previous scan
+ * @delta: Decrease amount
+ * @return Vector of results
+ */
 template<typename T>
 std::vector<ScanResult> Scanner::decreasedBy(const ResultSet& previousResults, T delta) {
     if (!previousResults.isValid()) {

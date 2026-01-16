@@ -26,6 +26,11 @@ namespace snake {
  * Registers Implementation
  * ============================================================================ */
 
+/**
+ * Registers::from_kernel - Convert kernel register payload to C++ Registers
+ * @k: Kernel register payload
+ * @return Converted Registers instance
+ */
 Registers Registers::from_kernel(const snake_cpu_regs& k) {
     Registers r;
     r.rax = k.rax; r.rbx = k.rbx; r.rcx = k.rcx; r.rdx = k.rdx;
@@ -46,6 +51,10 @@ Registers Registers::from_kernel(const snake_cpu_regs& k) {
     return r;
 }
 
+/**
+ * Registers::to_kernel - Convert C++ registers to kernel wire format
+ * @k: Destination kernel register struct
+ */
 void Registers::to_kernel(snake_cpu_regs& k) const {
     k.rax = rax; k.rbx = rbx; k.rcx = rcx; k.rdx = rdx;
     k.rsi = rsi; k.rdi = rdi; k.rbp = rbp; k.rsp = rsp;
@@ -64,6 +73,11 @@ void Registers::to_kernel(snake_cpu_regs& k) const {
     }
 }
 
+/**
+ * Registers::get - Read a register value by name
+ * @name: Register name (e.g. "rax", "rip")
+ * @return Register value
+ */
 uint64_t Registers::get(const std::string& name) const {
     if (name == "rax") return rax;
     if (name == "rbx") return rbx;
@@ -86,6 +100,11 @@ uint64_t Registers::get(const std::string& name) const {
     throw DriverException("Unknown register: " + name);
 }
 
+/**
+ * Registers::set - Set a register value by name
+ * @name: Register name
+ * @value: Value to set
+ */
 void Registers::set(const std::string& name, uint64_t value) {
     if (name == "rax") { rax = value; return; }
     if (name == "rbx") { rbx = value; return; }
@@ -112,6 +131,11 @@ void Registers::set(const std::string& name, uint64_t value) {
  * DebugEvent Implementation
  * ============================================================================ */
 
+/**
+ * DebugEvent::from_kernel - Convert kernel event to C++ DebugEvent
+ * @k: Kernel event payload
+ * @return Converted DebugEvent
+ */
 DebugEvent DebugEvent::from_kernel(const snake_debug_event& k) {
     DebugEvent e;
     e.type = static_cast<EventType>(k.type);
@@ -143,6 +167,9 @@ public:
     std::mutex callback_mutex;
     EventCallback event_callback;
     
+    /**
+     * ~Impl - Ensure event loop is stopped and FD is closed
+     */
     ~Impl() {
         stopEventLoop();
         if (fd >= 0) {
@@ -150,6 +177,9 @@ public:
         }
     }
     
+    /**
+     * stopEventLoop - Stop and join the event loop thread
+     */
     void stopEventLoop() {
         event_loop_running = false;
         if (event_thread.joinable()) {
@@ -158,17 +188,32 @@ public:
     }
 };
 
+/**
+ * Driver::Driver - Construct an unopened driver handle
+ */
 Driver::Driver() : impl_(std::make_unique<Impl>()) {}
 
+/**
+ * Driver::~Driver - Detach and close resources
+ */
 Driver::~Driver() {
     if (impl_ && impl_->attached_pid > 0) {
         try { detach(); } catch (...) {}
     }
 }
 
+/**
+ * Driver::Driver - Move constructor
+ */
 Driver::Driver(Driver&& other) noexcept = default;
+/**
+ * Driver::operator= - Move assignment
+ */
 Driver& Driver::operator=(Driver&& other) noexcept = default;
 
+/**
+ * Driver::open - Open the driver device node
+ */
 bool Driver::open() {
     if (impl_->fd >= 0) return true;
     
@@ -179,6 +224,9 @@ bool Driver::open() {
     return true;
 }
 
+/**
+ * Driver::close - Close the driver handle and detach if needed
+ */
 void Driver::close() {
     if (impl_->attached_pid > 0) {
         detach();
@@ -189,14 +237,23 @@ void Driver::close() {
     }
 }
 
+/**
+ * Driver::isOpen - Check if the driver FD is open
+ */
 bool Driver::isOpen() const {
     return impl_->fd >= 0;
 }
 
+/**
+ * Driver::getFd - Return the driver FD (internal use)
+ */
 int Driver::getFd() const {
     return impl_->fd;
 }
 
+/**
+ * Driver::getInfo - Query driver info via IOCTL
+ */
 DriverInfo Driver::getInfo() const {
     if (!isOpen()) {
         throw DriverException("Driver not open");
@@ -221,6 +278,9 @@ DriverInfo Driver::getInfo() const {
     return info;
 }
 
+/**
+ * Driver::attach - Attach to a target process
+ */
 bool Driver::attach(ProcessId pid) {
     if (!isOpen()) {
         throw DriverException("Driver not open");
@@ -246,6 +306,9 @@ bool Driver::attach(ProcessId pid) {
     return true;
 }
 
+/**
+ * Driver::detach - Detach from the current process
+ */
 void Driver::detach() {
     if (!isOpen() || impl_->attached_pid <= 0) return;
     
@@ -260,6 +323,9 @@ void Driver::detach() {
     impl_->attached_pid = 0;
 }
 
+/**
+ * Driver::continueExecution - Continue execution after a debug stop
+ */
 bool Driver::continueExecution(ThreadId tid) {
     if (!isAttached()) return false;
     snake_debug_control ctrl{};
@@ -269,6 +335,9 @@ bool Driver::continueExecution(ThreadId tid) {
     return ioctl(impl_->fd, SNAKE_IOCTL_DEBUG_CONTROL, &ctrl) == 0;
 }
 
+/**
+ * Driver::singleStep - Single-step a thread
+ */
 bool Driver::singleStep(ThreadId tid) {
     if (!isAttached()) return false;
     snake_debug_control ctrl{};
@@ -278,14 +347,23 @@ bool Driver::singleStep(ThreadId tid) {
     return ioctl(impl_->fd, SNAKE_IOCTL_DEBUG_CONTROL, &ctrl) == 0;
 }
 
+/**
+ * Driver::isAttached - Check whether a process is attached
+ */
 bool Driver::isAttached() const {
     return impl_->attached_pid > 0;
 }
 
+/**
+ * Driver::attachedPid - Return the attached PID
+ */
 ProcessId Driver::attachedPid() const {
     return impl_->attached_pid;
 }
 
+/**
+ * Driver::readMemory - Read memory from the attached process
+ */
 size_t Driver::readMemory(Address address, void* buffer, size_t size) {
     if (!isAttached()) {
         throw NotAttachedException();
@@ -304,6 +382,9 @@ size_t Driver::readMemory(Address address, void* buffer, size_t size) {
     return op.result > 0 ? static_cast<size_t>(op.result) : 0;
 }
 
+/**
+ * Driver::writeMemory - Write memory to the attached process
+ */
 size_t Driver::writeMemory(Address address, const void* buffer, size_t size) {
     if (!isAttached()) {
         throw NotAttachedException();
@@ -322,6 +403,9 @@ size_t Driver::writeMemory(Address address, const void* buffer, size_t size) {
     return op.result > 0 ? static_cast<size_t>(op.result) : 0;
 }
 
+/**
+ * Driver::readBytes - Convenience wrapper for byte reads
+ */
 std::vector<uint8_t> Driver::readBytes(Address address, size_t size) {
     std::vector<uint8_t> buffer(size);
     size_t read = readMemory(address, buffer.data(), size);
@@ -329,10 +413,16 @@ std::vector<uint8_t> Driver::readBytes(Address address, size_t size) {
     return buffer;
 }
 
+/**
+ * Driver::writeBytes - Convenience wrapper for byte writes
+ */
 bool Driver::writeBytes(Address address, const std::vector<uint8_t>& data) {
     return writeMemory(address, data.data(), data.size()) == data.size();
 }
 
+/**
+ * Driver::readString - Read a null-terminated string
+ */
 std::string Driver::readString(Address address, size_t maxLength) {
     std::vector<char> buffer(maxLength + 1);
     size_t read = readMemory(address, buffer.data(), maxLength);
@@ -340,10 +430,16 @@ std::string Driver::readString(Address address, size_t maxLength) {
     return std::string(buffer.data());
 }
 
+/**
+ * Driver::writeString - Write a null-terminated string
+ */
 bool Driver::writeString(Address address, const std::string& str) {
     return writeMemory(address, str.c_str(), str.size() + 1) == str.size() + 1;
 }
 
+/**
+ * Driver::readPhys - Read physical memory
+ */
 std::vector<uint8_t> Driver::readPhys(Address phys, size_t size) {
     std::vector<uint8_t> buffer(size);
     snake_phys_op op{};
@@ -359,6 +455,9 @@ std::vector<uint8_t> Driver::readPhys(Address phys, size_t size) {
     return buffer;
 }
 
+/**
+ * Driver::writePhys - Write physical memory
+ */
 bool Driver::writePhys(Address phys, const std::vector<uint8_t>& data) {
     snake_phys_op op{};
     op.phys_address = phys;
@@ -367,6 +466,9 @@ bool Driver::writePhys(Address phys, const std::vector<uint8_t>& data) {
     return ioctl(impl_->fd, SNAKE_IOCTL_WRITE_PHYS, &op) == 0 && op.result == (int)data.size();
 }
 
+/**
+ * Driver::virtToPhys - Translate virtual to physical address
+ */
 std::optional<snake_virt_to_phys> Driver::virtToPhys(Address virt) {
     if (!isAttached()) return std::nullopt;
     snake_virt_to_phys vtp{};
@@ -376,6 +478,9 @@ std::optional<snake_virt_to_phys> Driver::virtToPhys(Address virt) {
     return vtp;
 }
 
+/**
+ * Driver::queryMemoryRegions - Enumerate memory regions
+ */
 std::vector<MemoryRegion> Driver::queryMemoryRegions(Address start) {
     if (!isAttached()) {
         throw NotAttachedException();
@@ -420,6 +525,9 @@ MemoryRegion region;
     return result;
 }
 
+/**
+ * Driver::findRegion - Find region containing an address
+ */
 std::optional<MemoryRegion> Driver::findRegion(Address address) {
     auto regions = queryMemoryRegions();
     for (const auto& region : regions) {
@@ -430,6 +538,9 @@ std::optional<MemoryRegion> Driver::findRegion(Address address) {
     return std::nullopt;
 }
 
+/**
+ * Driver::setBreakpoint - Configure a hardware breakpoint
+ */
 std::optional<Breakpoint> Driver::setBreakpoint(Address address,
                                                 BreakpointType type,
                                                 BreakpointLength length) {
@@ -455,10 +566,16 @@ std::optional<Breakpoint> Driver::setBreakpoint(Address address,
     return Breakpoint(kbp.id, kbp.slot, address, type);
 }
 
+/**
+ * Driver::clearBreakpoint - Clear a breakpoint by handle
+ */
 bool Driver::clearBreakpoint(const Breakpoint& bp) {
     return clearBreakpoint(bp.slot());
 }
 
+/**
+ * Driver::clearBreakpoint - Clear a breakpoint by slot
+ */
 bool Driver::clearBreakpoint(uint32_t slot) {
     if (!isAttached()) {
         throw NotAttachedException();
@@ -475,12 +592,18 @@ bool Driver::clearBreakpoint(uint32_t slot) {
     return kbp.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::clearAllBreakpoints - Clear all hardware breakpoints
+ */
 void Driver::clearAllBreakpoints() {
     for (uint32_t i = 0; i < 4; i++) {
         clearBreakpoint(i);
     }
 }
 
+/**
+ * Driver::suspend - Suspend the attached process
+ */
 bool Driver::suspend() {
     snake_process_op op{};
     op.pid = impl_->attached_pid;
@@ -488,6 +611,9 @@ bool Driver::suspend() {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::resume - Resume the attached process
+ */
 bool Driver::resume() {
     snake_process_op op{};
     op.pid = impl_->attached_pid;
@@ -495,6 +621,9 @@ bool Driver::resume() {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::kill - Terminate the attached process
+ */
 bool Driver::kill() {
     snake_process_op op{};
     op.pid = impl_->attached_pid;
@@ -502,6 +631,9 @@ bool Driver::kill() {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::getRegisters - Read registers for a thread
+ */
 std::optional<Registers> Driver::getRegisters(ThreadId tid) {
     if (!isAttached()) {
         return std::nullopt;
@@ -518,6 +650,9 @@ std::optional<Registers> Driver::getRegisters(ThreadId tid) {
     return Registers::from_kernel(op.regs);
 }
 
+/**
+ * Driver::setRegisters - Write registers for a thread
+ */
 bool Driver::setRegisters(ThreadId tid, const Registers& regs) {
     if (!isAttached()) {
         return false;
@@ -531,6 +666,9 @@ bool Driver::setRegisters(ThreadId tid, const Registers& regs) {
     return ioctl(impl_->fd, SNAKE_IOCTL_SET_REGS, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::pollEvents - Poll for debug events
+ */
 std::vector<DebugEvent> Driver::pollEvents(uint32_t maxEvents,
                                            std::chrono::milliseconds timeout) {
     if (!isOpen()) {
@@ -557,16 +695,25 @@ std::vector<DebugEvent> Driver::pollEvents(uint32_t maxEvents,
     return result;
 }
 
+/**
+ * Driver::setEventCallback - Register an event callback
+ */
 void Driver::setEventCallback(EventCallback callback) {
     std::lock_guard<std::mutex> lock(impl_->callback_mutex);
     impl_->event_callback = std::move(callback);
 }
 
+/**
+ * Driver::clearEventCallback - Clear the event callback
+ */
 void Driver::clearEventCallback() {
     std::lock_guard<std::mutex> lock(impl_->callback_mutex);
     impl_->event_callback = nullptr;
 }
 
+/**
+ * Driver::startEventLoop - Start the background event polling loop
+ */
 void Driver::startEventLoop() {
     if (impl_->event_loop_running) return;
     
@@ -585,6 +732,9 @@ void Driver::startEventLoop() {
     });
 }
 
+/**
+ * Driver::stopEventLoop - Stop the background event loop
+ */
 void Driver::stopEventLoop() {
     impl_->stopEventLoop();
 }
@@ -593,6 +743,9 @@ void Driver::stopEventLoop() {
  * Injection / Manual Mapping Implementation
  * ============================================================================ */
 
+/**
+ * Driver::injectAlloc - Allocate memory in a target process
+ */
 Driver::InjectionResult Driver::injectAlloc(ProcessId pid, size_t size, Protection prot) {
     InjectionResult result{false, 0, 0, ""};
 
@@ -623,6 +776,9 @@ Driver::InjectionResult Driver::injectAlloc(ProcessId pid, size_t size, Protecti
     return result;
 }
 
+/**
+ * Driver::injectProtect - Change protection on a remote allocation
+ */
 Driver::InjectionResult Driver::injectProtect(ProcessId pid, Address address, size_t size, Protection prot) {
     InjectionResult result{false, 0, 0, ""};
 
@@ -654,6 +810,9 @@ Driver::InjectionResult Driver::injectProtect(ProcessId pid, Address address, si
     return result;
 }
 
+/**
+ * Driver::injectThread - Create a remote thread
+ */
 Driver::InjectionResult Driver::injectThread(ProcessId pid, Address entryPoint, uint64_t argument) {
     InjectionResult result{false, 0, 0, ""};
 
@@ -684,6 +843,11 @@ Driver::InjectionResult Driver::injectThread(ProcessId pid, Address entryPoint, 
     return result;
 }
 
+/**
+ * Driver::manualMapLibrary - Manual map an ELF shared object (stub)
+ *
+ * This is not yet implemented in the userland wrapper.
+ */
 Driver::InjectionResult Driver::manualMapLibrary(ProcessId pid, const std::string& libraryPath) {
     InjectionResult result{false, 0, 0, ""};
 
@@ -693,6 +857,9 @@ Driver::InjectionResult Driver::manualMapLibrary(ProcessId pid, const std::strin
     return result;
 }
 
+/**
+ * Driver::executeShellcode - Allocate, write, and execute raw shellcode
+ */
 Driver::InjectionResult Driver::executeShellcode(ProcessId pid, const std::vector<uint8_t>& shellcode, uint64_t argument) {
     InjectionResult result{false, 0, 0, ""};
 
@@ -738,6 +905,9 @@ Driver::InjectionResult Driver::executeShellcode(ProcessId pid, const std::vecto
     return result;
 }
 
+/**
+ * Driver::suspendProcess - Suspend a process by PID
+ */
 bool Driver::suspendProcess(ProcessId pid) {
     if (!isOpen()) return false;
 
@@ -748,6 +918,9 @@ bool Driver::suspendProcess(ProcessId pid) {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::resumeProcess - Resume a process by PID
+ */
 bool Driver::resumeProcess(ProcessId pid) {
     if (!isOpen()) return false;
 
@@ -758,6 +931,9 @@ bool Driver::resumeProcess(ProcessId pid) {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::killProcess - Terminate a process by PID
+ */
 bool Driver::killProcess(ProcessId pid) {
     if (!isOpen()) return false;
 
@@ -768,6 +944,9 @@ bool Driver::killProcess(ProcessId pid) {
     return ioctl(impl_->fd, SNAKE_IOCTL_PROCESS_OP, &op) == 0 && op.result == SNAKEDRV_SUCCESS;
 }
 
+/**
+ * Driver::getProcessInfo - Query process metadata from the driver
+ */
 std::optional<Driver::ExtendedProcessInfo> Driver::getProcessInfo(ProcessId pid) {
     if (!isOpen()) return std::nullopt;
 
@@ -792,8 +971,12 @@ std::optional<Driver::ExtendedProcessInfo> Driver::getProcessInfo(ProcessId pid)
     return info;
 }
 
+/**
+ * Driver::getKernelThreads - Return kernel thread list (not implemented)
+ *
+ * TODO: Implement thread enumeration via kernel IOCTL.
+ */
 std::vector<Driver::KernelThreadInfo> Driver::getKernelThreads(ProcessId pid) {
-    // TODO: Implement thread enumeration via kernel
     return {};
 }
 
@@ -801,10 +984,16 @@ std::vector<Driver::KernelThreadInfo> Driver::getKernelThreads(ProcessId pid) {
  * Utility Functions
  * ============================================================================ */
 
+/**
+ * isDriverAvailable - Check whether the device node exists
+ */
 bool isDriverAvailable() {
     return access(SNAKEDRV_DEVICE_PATH, F_OK) == 0;
 }
 
+/**
+ * getDriverVersion - Query driver version without attaching
+ */
 std::optional<std::string> getDriverVersion() {
     int fd = ::open(SNAKEDRV_DEVICE_PATH, O_RDWR);
     if (fd < 0) return std::nullopt;
@@ -818,6 +1007,9 @@ std::optional<std::string> getDriverVersion() {
     return std::string(info.version_string);
 }
 
+/**
+ * listProcesses - Enumerate processes from /proc
+ */
 std::vector<ProcessInfo> listProcesses() {
     std::vector<ProcessInfo> result;
     
@@ -857,6 +1049,9 @@ std::vector<ProcessInfo> listProcesses() {
     return result;
 }
 
+/**
+ * findProcessByName - Find processes whose name contains the query
+ */
 std::vector<ProcessId> findProcessByName(const std::string& name) {
     std::vector<ProcessId> result;
     

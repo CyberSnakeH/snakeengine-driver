@@ -22,14 +22,23 @@ namespace snake {
  * Scanner Implementation
  * ============================================================================ */
 
+/**
+ * Scanner::Scanner - Construct a scanner bound to an attached driver
+ */
 Scanner::Scanner(Driver& driver) : driver_(driver) {
     if (!driver_.isAttached()) {
         throw NotAttachedException();
     }
 }
 
+/**
+ * Scanner::~Scanner - Default destructor
+ */
 Scanner::~Scanner() = default;
 
+/**
+ * Scanner::makeParams - Build base scan parameters
+ */
 snake_scan_params Scanner::makeParams(ScanType type, ValueType valueType) const {
     snake_scan_params params{};
     params.pid = driver_.attachedPid();
@@ -44,6 +53,9 @@ snake_scan_params Scanner::makeParams(ScanType type, ValueType valueType) const 
     return params;
 }
 
+/**
+ * Scanner::executeScan - Execute a scan via IOCTL
+ */
 std::vector<ScanResult> Scanner::executeScan(const snake_scan_params& params) {
     if (!driver_.isOpen()) {
         throw DriverException("Driver not open");
@@ -92,6 +104,9 @@ std::vector<ScanResult> Scanner::executeScan(const snake_scan_params& params) {
     return results;
 }
 
+/**
+ * Scanner::pattern - Scan for a byte pattern with wildcards
+ */
 std::vector<ScanResult> Scanner::pattern(const std::vector<int16_t>& pattern) {
     // Convert pattern with wildcards to byte array
     std::vector<uint8_t> bytes;
@@ -115,6 +130,9 @@ std::vector<ScanResult> Scanner::pattern(const std::vector<int16_t>& pattern) {
     return executeScan(params);
 }
 
+/**
+ * Scanner::stringAscii - Scan for an ASCII string
+ */
 std::vector<ScanResult> Scanner::stringAscii(const std::string& str, bool caseSensitive) {
     std::string searchStr = str;
     if (!caseSensitive) {
@@ -128,6 +146,9 @@ std::vector<ScanResult> Scanner::stringAscii(const std::string& str, bool caseSe
     return executeScan(params);
 }
 
+/**
+ * Scanner::stringUnicode - Scan for a UTF-16LE string
+ */
 std::vector<ScanResult> Scanner::stringUnicode(const std::wstring& str, bool caseSensitive) {
     // Convert wstring to UTF-16LE
     std::vector<uint16_t> utf16;
@@ -145,6 +166,9 @@ std::vector<ScanResult> Scanner::stringUnicode(const std::wstring& str, bool cas
     return executeScan(params);
 }
 
+/**
+ * Scanner::changedValue - Rescan for changed values
+ */
 std::vector<ScanResult> Scanner::changedValue(const ResultSet& previousResults) {
     if (!previousResults.isValid()) {
         throw std::invalid_argument("Invalid result set");
@@ -156,6 +180,9 @@ std::vector<ScanResult> Scanner::changedValue(const ResultSet& previousResults) 
     return executeScan(params);
 }
 
+/**
+ * Scanner::unchangedValue - Rescan for unchanged values
+ */
 std::vector<ScanResult> Scanner::unchangedValue(const ResultSet& previousResults) {
     if (!previousResults.isValid()) {
         throw std::invalid_argument("Invalid result set");
@@ -167,6 +194,9 @@ std::vector<ScanResult> Scanner::unchangedValue(const ResultSet& previousResults
     return executeScan(params);
 }
 
+/**
+ * Scanner::increasedValue - Rescan for increased values
+ */
 std::vector<ScanResult> Scanner::increasedValue(const ResultSet& previousResults) {
     if (!previousResults.isValid()) {
         throw std::invalid_argument("Invalid result set");
@@ -178,6 +208,9 @@ std::vector<ScanResult> Scanner::increasedValue(const ResultSet& previousResults
     return executeScan(params);
 }
 
+/**
+ * Scanner::decreasedValue - Rescan for decreased values
+ */
 std::vector<ScanResult> Scanner::decreasedValue(const ResultSet& previousResults) {
     if (!previousResults.isValid()) {
         throw std::invalid_argument("Invalid result set");
@@ -189,6 +222,9 @@ std::vector<ScanResult> Scanner::decreasedValue(const ResultSet& previousResults
     return executeScan(params);
 }
 
+/**
+ * Scanner::floatValue - Scan for float values with tolerance
+ */
 std::vector<ScanResult> Scanner::floatValue(float value, float tolerance) {
     // For float scans, we encode tolerance in search_value_2
     snake_scan_params params = makeParams(ScanType::Float, ValueType::Float);
@@ -205,6 +241,9 @@ std::vector<ScanResult> Scanner::floatValue(float value, float tolerance) {
     return executeScan(params);
 }
 
+/**
+ * Scanner::doubleValue - Scan for double values with tolerance
+ */
 std::vector<ScanResult> Scanner::doubleValue(double value, double tolerance) {
     snake_scan_params params = makeParams(ScanType::Float, ValueType::Double);
 
@@ -215,6 +254,9 @@ std::vector<ScanResult> Scanner::doubleValue(double value, double tolerance) {
     return executeScan(params);
 }
 
+/**
+ * Scanner::followPointerChain - Resolve a pointer chain
+ */
 std::optional<uint64_t> Scanner::followPointerChain(uint64_t baseAddress,
                                                      const std::vector<uint64_t>& offsets) {
     uint64_t current = baseAddress;
@@ -234,29 +276,47 @@ std::optional<uint64_t> Scanner::followPointerChain(uint64_t baseAddress,
     return current;
 }
 
+/**
+ * Scanner::setRange - Set scan address range
+ */
 void Scanner::setRange(uint64_t start, uint64_t end) {
     startAddress_ = start;
     endAddress_ = end;
 }
 
+/**
+ * Scanner::resetRange - Reset scan range to default
+ */
 void Scanner::resetRange() {
     startAddress_ = 0;
     endAddress_ = 0;
 }
 
+/**
+ * Scanner::setMaxResults - Set maximum results per scan
+ */
 void Scanner::setMaxResults(uint32_t max) {
     maxResults_ = max;
 }
 
+/**
+ * Scanner::setParallel - Enable or disable parallel scanning
+ */
 void Scanner::setParallel(bool enable, uint32_t numThreads) {
     parallel_ = enable;
     numThreads_ = numThreads;
 }
 
+/**
+ * Scanner::setBloomFilter - Enable or disable Bloom filters
+ */
 void Scanner::setBloomFilter(bool enable) {
     useBloom_ = enable;
 }
 
+/**
+ * Scanner::createResultSet - Return handle for the last result set
+ */
 ResultSet Scanner::createResultSet(const std::vector<ScanResult>& results) {
     // Result set is created automatically during scan and stored in lastResultSet_
     // Return the last result set from the most recent scan
@@ -266,6 +326,9 @@ ResultSet Scanner::createResultSet(const std::vector<ScanResult>& results) {
     return lastResultSet_;
 }
 
+/**
+ * Scanner::freeResultSet - Free a stored result set in the kernel
+ */
 void Scanner::freeResultSet(const ResultSet& resultSet) {
     if (!resultSet.isValid()) {
         return;
@@ -276,6 +339,9 @@ void Scanner::freeResultSet(const ResultSet& resultSet) {
     ioctl(fd, SNAKE_IOCTL_SCAN_FREE_RESULTS, &id);
 }
 
+/**
+ * Scanner::getResultSetInfo - Query metadata for a result set
+ */
 std::optional<snake_scan_result_set_info> Scanner::getResultSetInfo(const ResultSet& resultSet) {
     if (!resultSet.isValid()) {
         return std::nullopt;
@@ -296,6 +362,9 @@ std::optional<snake_scan_result_set_info> Scanner::getResultSetInfo(const Result
  * Global Functions
  * ============================================================================ */
 
+/**
+ * getBackendInfo - Query backend information
+ */
 BackendInfo getBackendInfo(Driver& driver) {
     if (!driver.isOpen()) {
         throw DriverException("Driver not open");
@@ -318,6 +387,9 @@ BackendInfo getBackendInfo(Driver& driver) {
     return info;
 }
 
+/**
+ * setBackend - Select the scanning backend
+ */
 bool setBackend(Driver& driver, BackendType type) {
     if (!driver.isOpen()) {
         return false;
@@ -329,6 +401,9 @@ bool setBackend(Driver& driver, BackendType type) {
     return ioctl(fd, SNAKE_IOCTL_SET_BACKEND, &backend) == 0;
 }
 
+/**
+ * getPerformanceStats - Query performance statistics
+ */
 PerformanceStats getPerformanceStats(Driver& driver) {
     if (!driver.isOpen()) {
         throw DriverException("Driver not open");
@@ -360,6 +435,9 @@ PerformanceStats getPerformanceStats(Driver& driver) {
     return stats;
 }
 
+/**
+ * resetPerformanceStats - Reset performance counters
+ */
 void resetPerformanceStats(Driver& driver) {
     if (!driver.isOpen()) {
         throw DriverException("Driver not open");
@@ -369,6 +447,9 @@ void resetPerformanceStats(Driver& driver) {
     ioctl(fd, SNAKE_IOCTL_RESET_PERF_STATS);
 }
 
+/**
+ * getScanOptions - Query global scan options
+ */
 ScanOptions getScanOptions(Driver& driver) {
     if (!driver.isOpen()) {
         throw DriverException("Driver not open");
@@ -392,6 +473,9 @@ ScanOptions getScanOptions(Driver& driver) {
     return opts;
 }
 
+/**
+ * setScanOptions - Update global scan options
+ */
 void setScanOptions(Driver& driver, const ScanOptions& options) {
     if (!driver.isOpen()) {
         throw DriverException("Driver not open");

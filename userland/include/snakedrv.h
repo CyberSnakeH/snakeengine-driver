@@ -496,7 +496,9 @@ struct snake_inject_thread {
 #define SNAKE_NETLINK_FAMILY_NAME   "SNAKEDRV"
 #define SNAKE_NETLINK_VERSION       1
 
-/* Netlink message types */
+/**
+ * enum snake_netlink_cmd - Netlink command identifiers
+ */
 enum snake_netlink_cmd {
     SNAKE_NL_CMD_UNSPEC = 0,
     SNAKE_NL_CMD_SUBSCRIBE,         /* Subscribe to events */
@@ -505,7 +507,9 @@ enum snake_netlink_cmd {
     __SNAKE_NL_CMD_MAX,
 };
 
-/* Netlink attributes */
+/**
+ * enum snake_netlink_attr - Netlink attribute identifiers
+ */
 enum snake_netlink_attr {
     SNAKE_NL_ATTR_UNSPEC = 0,
     SNAKE_NL_ATTR_PID,              /* Target PID */
