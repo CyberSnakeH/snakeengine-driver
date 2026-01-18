@@ -127,4 +127,4 @@ Contributions are welcome. Please follow `wiki/Contributing.md` and keep kernel 
 GPL-2.0
 
 ## Disclaimer
-This project is for educational and research use. Do not use it to violate game terms of service or local laws.
+This project is for educational and research use. 
