@@ -90,9 +90,14 @@ std::vector<ScanResult> Scanner::executeScan(const snake_scan_params& params) {
     // Store result set for future rescans
     lastResultSet_ = ResultSet(exec.result_set_id, exec.total_matches);
 
-    // Convert results
-    results.reserve(exec.results_count);
-    for (uint32_t i = 0; i < exec.results_count; i++) {
+    /*
+     * Cap results_count to what we actually allocated.  A kernel bug
+     * or version mismatch could return a count larger than capacity.
+     */
+    uint32_t safe_count = std::min(exec.results_count,
+                                   static_cast<uint32_t>(MAX_RESULTS_PER_CALL));
+    results.reserve(safe_count);
+    for (uint32_t i = 0; i < safe_count; i++) {
         ScanResult r;
         r.address = kresults[i].address;
         r.value = kresults[i].value;
@@ -108,22 +113,24 @@ std::vector<ScanResult> Scanner::executeScan(const snake_scan_params& params) {
  * Scanner::pattern - Scan for a byte pattern with wildcards
  */
 std::vector<ScanResult> Scanner::pattern(const std::vector<int16_t>& pattern) {
-    // Convert pattern with wildcards to byte array
     std::vector<uint8_t> bytes;
-    std::vector<uint8_t> mask;
+    bytes.reserve(pattern.size());
 
     for (int16_t p : pattern) {
         if (p < 0 || p > 255) {
-            // Wildcard
-            bytes.push_back(0);
-            mask.push_back(0);
+            bytes.push_back(0);   /* wildcard */
         } else {
             bytes.push_back(static_cast<uint8_t>(p));
-            mask.push_back(0xFF);
         }
     }
 
     snake_scan_params params = makeParams(ScanType::Pattern, ValueType::Bytes);
+
+    /*
+     * The kernel reads pattern bytes via copy_from_user during the
+     * ioctl — the buffer must survive until executeScan returns.
+     * bytes lives on this stack frame so it outlives the ioctl call.
+     */
     params.pattern = reinterpret_cast<uint64_t>(bytes.data());
     params.pattern_len = bytes.size();
 
@@ -136,10 +143,17 @@ std::vector<ScanResult> Scanner::pattern(const std::vector<int16_t>& pattern) {
 std::vector<ScanResult> Scanner::stringAscii(const std::string& str, bool caseSensitive) {
     std::string searchStr = str;
     if (!caseSensitive) {
-        std::transform(searchStr.begin(), searchStr.end(), searchStr.begin(), ::tolower);
+        std::transform(searchStr.begin(), searchStr.end(),
+                       searchStr.begin(), ::tolower);
     }
 
     snake_scan_params params = makeParams(ScanType::StringAscii, ValueType::Bytes);
+
+    /*
+     * searchStr lives on this stack frame; the ioctl in executeScan
+     * is synchronous, so the pointer remains valid for the duration
+     * of the copy_from_user in the kernel.
+     */
     params.pattern = reinterpret_cast<uint64_t>(searchStr.c_str());
     params.pattern_len = searchStr.length();
 
@@ -262,15 +276,14 @@ std::optional<uint64_t> Scanner::followPointerChain(uint64_t baseAddress,
     uint64_t current = baseAddress;
 
     for (size_t i = 0; i < offsets.size(); i++) {
-        // Read pointer at current address
         uint64_t pointer = 0;
-        size_t read = driver_.readMemory(current, &pointer, sizeof(pointer));
-        if (read != sizeof(pointer) || pointer == 0) {
-            return std::nullopt;  // Invalid pointer
-        }
+        size_t bytesRead = driver_.readMemory(current, &pointer, sizeof(pointer));
+        if (bytesRead != sizeof(pointer) || pointer == 0)
+            return std::nullopt;
 
-        // Add offset
-        current = pointer + offsets[i];
+        /* Check for address space overflow */
+        if (__builtin_add_overflow(pointer, offsets[i], &current))
+            return std::nullopt;
     }
 
     return current;
@@ -317,11 +330,16 @@ void Scanner::setBloomFilter(bool enable) {
 /**
  * Scanner::createResultSet - Return handle for the last result set
  */
-ResultSet Scanner::createResultSet(const std::vector<ScanResult>& results) {
-    // Result set is created automatically during scan and stored in lastResultSet_
-    // Return the last result set from the most recent scan
+ResultSet Scanner::createResultSet(const std::vector<ScanResult>& /* results */) {
+    /*
+     * Result sets are created kernel-side during executeScan and
+     * cached in lastResultSet_.  The parameter is retained for API
+     * compatibility but is not used — the kernel owns the canonical
+     * result data.
+     */
     if (!lastResultSet_.isValid()) {
-        throw std::runtime_error("No valid result set available. Perform a scan first.");
+        throw std::runtime_error(
+            "No valid result set available. Perform a scan first.");
     }
     return lastResultSet_;
 }

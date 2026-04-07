@@ -33,6 +33,14 @@
 #include "../userland/include/snakedrv.h"
 #include "snakedrv_injector.h"
 
+/* Completion timeout for worker threads (5 seconds) */
+#define INJECTOR_WORKER_TIMEOUT_MS  5000
+
+#ifndef SDRV_DEBUG
+#define SDRV_DEBUG(fmt, ...) \
+    pr_debug("snakedrv: [DBG] " fmt, ##__VA_ARGS__)
+#endif
+
 /* Helper to map snake protection flags to kernel vm_flags */
 static unsigned long map_prot_flags(uint32_t snake_prot)
 {
@@ -75,15 +83,15 @@ static void injector_hide_vma(struct mm_struct *mm, unsigned long addr)
     }
 
     /*
-     * We modify the VMA flags to disable dumping and merging before unlinking.
+     * Modify VMA flags to disable dumping and merging before unlinking.
      * VM_IO | VM_PFNMAP prevents core dumping and some access checks.
      * VM_DONTEXPAND prevents growing.
      */
-    {
-        /* Use raw pointer access to bypass const qualifiers in newer kernels */
-        unsigned long *flags_ptr = (unsigned long *)&vma->vm_flags;
-        *flags_ptr |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
-    }
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+    vm_flags_set(vma, VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#else
+    vma->vm_flags |= (VM_IO | VM_PFNMAP | VM_DONTEXPAND | VM_DONTDUMP);
+#endif
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
     /* 
@@ -92,26 +100,29 @@ static void injector_hide_vma(struct mm_struct *mm, unsigned long addr)
      */
     {
         struct vma_iterator vmi;
-        
-        /* Initialize iterator at address */
-        vma_iter_init(&vmi, mm, addr);
-        
-        /* 
-         * Store NULL at the current range to remove it.
-         * using mas_store directly as vma_iter_store might not be exported/visible.
+
+        vma_iter_init(&vmi, mm, vma->vm_start);
+
+        /*
+         * mas_store needs the FULL range of the VMA, not just a
+         * single address.  vma_iter_init sets mas.index=mas.last=addr
+         * which would only clear a point.  We must cover [vm_start,
+         * vm_end-1] so the entire maple tree entry is replaced with
+         * NULL (gap).
          */
-        /* 
-         * Store NULL at the current range to remove it.
-         * using mas_store directly as vma_iter_store might not be exported/visible.
-         */
-        mas_store(&vmi.mas, NULL);
+        mas_set_range(&vmi.mas, vma->vm_start, vma->vm_end - 1);
+        mas_store_gfp(&vmi.mas, NULL, GFP_KERNEL);
+
         if (mas_is_err(&vmi.mas)) {
-             pr_warn("snakedrv: Failed to unlink VMA (maple tree error)\n");
+            pr_warn("snakedrv: maple tree store failed, "
+                    "VMA at 0x%lx remains visible\n", addr);
+            mas_reset(&vmi.mas);
         } else {
-             mm->map_count--;
-             pr_info("snakedrv: VMA unlinked (Maple Tree)\n");
+            mm->map_count--;
+            pr_info("snakedrv: VMA hidden: 0x%lx-0x%lx removed "
+                    "from maple tree\n",
+                    vma->vm_start, vma->vm_end);
         }
-        // pr_info("snakedrv: VMA stealth skipped for debugging\n");
     }
 #else
     /*
@@ -218,11 +229,17 @@ int injector_allocate(struct snake_inject_alloc *alloc_info)
         return PTR_ERR(worker);
     }
 
-    /* Wait for allocation to complete */
-    wait_for_completion(&ctx.done);
+    /* Wait for allocation to complete — bounded */
+    if (!wait_for_completion_timeout(&ctx.done,
+            msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+        pr_err("snakedrv: alloc worker timed out\n");
+        mmput(mm);
+        put_task_struct(task);
+        return -ETIMEDOUT;
+    }
 
     alloc_info->address = ctx.addr_out;
-    
+
     mmput(mm);
     put_task_struct(task);
     return ctx.ret;
@@ -277,7 +294,6 @@ int injector_apply_stealth(struct snake_inject_protect *info)
     ctx.address = info->address;
     init_completion(&ctx.done);
 
-    /* Use kthread to ensure we are in a clean context */
     worker = kthread_run(injector_stealth_worker, &ctx, "snake_stealth");
     if (IS_ERR(worker)) {
         mmput(mm);
@@ -285,8 +301,14 @@ int injector_apply_stealth(struct snake_inject_protect *info)
         return PTR_ERR(worker);
     }
 
-    wait_for_completion(&ctx.done);
-    
+    if (!wait_for_completion_timeout(&ctx.done,
+            msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+        pr_err("snakedrv: stealth worker timed out\n");
+        mmput(mm);
+        put_task_struct(task);
+        return -ETIMEDOUT;
+    }
+
     mmput(mm);
     put_task_struct(task);
     return 0;
@@ -358,22 +380,20 @@ static int injector_protect_worker(void *data)
         /* For kernel >= 6.3, vm_flags modification should use helpers */
         /* We use a cast to bypass const if needed, or simple assignment if allowed by macro */
         {
-            unsigned long new_flags = vma->vm_flags;
-            
-            if (ctx->prot & PROT_EXEC) {
-                new_flags |= VM_EXEC;
-            }
-            if (ctx->prot & PROT_WRITE) {
-                new_flags |= VM_WRITE;
-            }
-            if (ctx->prot & PROT_READ) {
-                new_flags |= VM_READ;
-            }
-            
-            /* Force update flags (Kernel hack) */
-            /* In newer kernels vm_flags might be const or require special accessors */
-            /* We use a pointer cast to write to it regardless */
-            *(unsigned long *)&vma->vm_flags = new_flags;
+            unsigned long set_flags = 0;
+
+            if (ctx->prot & PROT_EXEC)
+                set_flags |= VM_EXEC;
+            if (ctx->prot & PROT_WRITE)
+                set_flags |= VM_WRITE;
+            if (ctx->prot & PROT_READ)
+                set_flags |= VM_READ;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+            vm_flags_set(vma, set_flags);
+#else
+            vma->vm_flags |= set_flags;
+#endif
         }
         
         /* Find next VMA */
@@ -433,8 +453,14 @@ int injector_protect(struct snake_inject_protect *protect_info)
         return PTR_ERR(worker);
     }
 
-    wait_for_completion(&ctx.done);
-    
+    if (!wait_for_completion_timeout(&ctx.done,
+            msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+        pr_err("snakedrv: protect worker timed out\n");
+        mmput(mm);
+        put_task_struct(task);
+        return -ETIMEDOUT;
+    }
+
     mmput(mm);
     put_task_struct(task);
     return ctx.ret;
@@ -530,6 +556,15 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
     regs->ax = 0;
     regs->orig_ax = ~0UL;
     {
+        /*
+         * Simulate a CALL: push the return address onto the stack.
+         * RSP after ret will be exactly original_rsp (no shift).
+         *
+         * The payload is compiled with -mincoming-stack-boundary=3
+         * so the compiler handles 16-byte alignment in the prologue
+         * itself (and rsp, -16).  This avoids corrupting the game
+         * thread's stack frame.
+         */
         unsigned long new_sp = original_rsp - 8;
         int written = access_process_vm(task, new_sp,
                                         &original_rip,
@@ -571,4 +606,442 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
 
     put_task_struct(task);
     return 0;
+}
+
+/* ============================================================================
+ * Shadow Memory: Pin-and-Hide Approach
+ *
+ * Strategy:
+ *   1. vm_mmap(MAP_POPULATE) creates VMA + PTEs + resident pages
+ *   2. get_user_pages_remote() pins every page (refcount++)
+ *   3. injector_hide_vma() removes VMA from maple tree
+ *   4. Pages stay resident (pinned), PTEs intact, no /proc visibility
+ *   5. Writes go directly to pinned pages via kmap_local_page
+ *
+ * All functions used (vm_mmap, get_user_pages_remote, kthread_use_mm,
+ * kmap_local_page) are EXPORT_SYMBOL — no unexported symbol hacks.
+ * ============================================================================ */
+
+#include <linux/highmem.h>
+
+#define SHADOW_MAX_SIZE		(256UL << 20)
+
+struct shadow_alloc_entry {
+	struct list_head list;
+	struct mm_struct *mm;
+	pid_t pid;
+	unsigned long vaddr;
+	unsigned long size;
+	unsigned int nr_pages;
+	struct page **pages;   /* pinned pages from get_user_pages */
+};
+
+static DEFINE_MUTEX(shadow_mutex);
+static LIST_HEAD(shadow_list);
+
+/* Worker context for vm_mmap in target mm */
+struct shadow_mmap_ctx {
+	struct mm_struct *mm;
+	unsigned long size;
+	unsigned long prot;
+	unsigned long addr_out;
+	struct completion done;
+	int ret;
+};
+
+static int shadow_mmap_worker(void *data)
+{
+	struct shadow_mmap_ctx *ctx = data;
+
+	kthread_use_mm(ctx->mm);
+
+	ctx->addr_out = vm_mmap(NULL, 0, ctx->size, ctx->prot,
+				MAP_ANONYMOUS | MAP_PRIVATE | MAP_POPULATE,
+				0);
+	if (IS_ERR_VALUE(ctx->addr_out)) {
+		ctx->ret = (int)ctx->addr_out;
+		ctx->addr_out = 0;
+	} else {
+		ctx->ret = 0;
+	}
+
+	kthread_unuse_mm(ctx->mm);
+	complete(&ctx->done);
+	return 0;
+}
+
+static struct shadow_alloc_entry *
+shadow_find_entry(pid_t pid, unsigned long addr)
+{
+	struct shadow_alloc_entry *sa;
+
+	list_for_each_entry(sa, &shadow_list, list) {
+		if (sa->pid == pid &&
+		    addr >= sa->vaddr && addr < sa->vaddr + sa->size)
+			return sa;
+	}
+	return NULL;
+}
+
+static void shadow_unpin_pages(struct shadow_alloc_entry *sa)
+{
+	unsigned int i;
+
+	for (i = 0; i < sa->nr_pages; i++) {
+		if (sa->pages[i])
+			put_page(sa->pages[i]);
+	}
+}
+
+/*
+ * shadow_reclaim_ctx - Worker to re-create VMA at the shadow address
+ * via MAP_FIXED, then immediately vm_munmap it.  This forces the
+ * kernel to properly tear down orphaned PTEs and restore mm accounting.
+ */
+struct shadow_reclaim_ctx {
+	struct mm_struct *mm;
+	unsigned long addr;
+	unsigned long size;
+	struct completion done;
+	int ret;
+};
+
+static int shadow_reclaim_worker(void *data)
+{
+	struct shadow_reclaim_ctx *ctx = data;
+	unsigned long addr;
+
+	kthread_use_mm(ctx->mm);
+
+	/*
+	 * MAP_FIXED at the shadow address forces the kernel to:
+	 *  1. Create a new VMA covering [addr, addr+size)
+	 *  2. Tear down any existing PTEs in that range (zap_page_range)
+	 *  3. Map fresh anonymous pages
+	 * This cleans up our orphaned PTEs from the hidden VMA.
+	 */
+	addr = vm_mmap(NULL, ctx->addr, ctx->size,
+		       PROT_READ | PROT_WRITE,
+		       MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, 0);
+	if (!IS_ERR_VALUE(addr)) {
+		/* Now munmap to release everything cleanly */
+		vm_munmap(addr, ctx->size);
+		ctx->ret = 0;
+	} else {
+		ctx->ret = (int)addr;
+	}
+
+	kthread_unuse_mm(ctx->mm);
+	complete(&ctx->done);
+	return 0;
+}
+
+static void shadow_restore_and_cleanup(struct shadow_alloc_entry *sa)
+{
+	struct shadow_reclaim_ctx ctx;
+	struct task_struct *worker;
+
+	if (atomic_read(&sa->mm->mm_users) == 0)
+		return;
+
+	ctx.mm   = sa->mm;
+	ctx.addr = sa->vaddr;
+	ctx.size = sa->size;
+	init_completion(&ctx.done);
+
+	worker = kthread_run(shadow_reclaim_worker, &ctx, "snake_sh_clean");
+	if (IS_ERR(worker))
+		return;
+
+	if (!wait_for_completion_timeout(&ctx.done,
+			msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+		pr_warn("snakedrv: shadow reclaim timed out\n");
+		return;
+	}
+
+	if (ctx.ret)
+		pr_warn("snakedrv: shadow reclaim failed: %d\n", ctx.ret);
+}
+
+static void shadow_teardown_entry(struct shadow_alloc_entry *sa)
+{
+	/*
+	 * 1. Unpin pages (drop the get_user_pages reference)
+	 * 2. MAP_FIXED + vm_munmap to reclaim the address range,
+	 *    zap orphaned PTEs, and restore mm_struct accounting
+	 * 3. Release mm reference and free tracking structures
+	 */
+	shadow_unpin_pages(sa);
+	shadow_restore_and_cleanup(sa);
+	mmput(sa->mm);
+	kvfree(sa->pages);
+	kfree(sa);
+}
+
+/* ---- public API ---- */
+
+/**
+ * injector_shadow_alloc - Allocate invisible memory in target process
+ *
+ * 1. vm_mmap(MAP_POPULATE) in target mm context (creates VMA + pages)
+ * 2. Pin all pages with get_user_pages_remote (prevents reclaim)
+ * 3. Hide VMA from maple tree (removes /proc/pid/maps visibility)
+ * 4. Pages stay resident via pin, PTEs intact, invisible
+ */
+int injector_shadow_alloc(struct snake_shadow_alloc *info)
+{
+	struct task_struct *task;
+	struct mm_struct *mm;
+	struct shadow_alloc_entry *sa;
+	struct shadow_mmap_ctx ctx;
+	struct task_struct *worker;
+	unsigned long size;
+	unsigned int nr_pages;
+	long pinned;
+
+	size = PAGE_ALIGN(info->size);
+	if (size == 0 || size > SHADOW_MAX_SIZE)
+		return -EINVAL;
+	nr_pages = size >> PAGE_SHIFT;
+
+	/* Resolve target */
+	rcu_read_lock();
+	task = pid_task(find_vpid(info->pid), PIDTYPE_PID);
+	if (!task) { rcu_read_unlock(); return -ESRCH; }
+	get_task_struct(task);
+	rcu_read_unlock();
+
+	mm = get_task_mm(task);
+	put_task_struct(task);
+	if (!mm)
+		return -EINVAL;
+
+	/* Step 1: allocate in target mm via worker thread */
+	ctx.mm       = mm;
+	ctx.size     = size;
+	ctx.prot     = 0;
+	if (info->protection & SNAKE_PROT_READ)  ctx.prot |= PROT_READ;
+	if (info->protection & SNAKE_PROT_WRITE) ctx.prot |= PROT_WRITE;
+	if (info->protection & SNAKE_PROT_EXEC)  ctx.prot |= PROT_EXEC;
+	init_completion(&ctx.done);
+
+	worker = kthread_run(shadow_mmap_worker, &ctx, "snake_shadow");
+	if (IS_ERR(worker)) {
+		mmput(mm);
+		return PTR_ERR(worker);
+	}
+
+	if (!wait_for_completion_timeout(&ctx.done,
+			msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+		mmput(mm);
+		return -ETIMEDOUT;
+	}
+
+	if (ctx.ret) {
+		mmput(mm);
+		return ctx.ret;
+	}
+
+	/* Tracking structure */
+	sa = kzalloc(sizeof(*sa), GFP_KERNEL);
+	if (!sa) {
+		/* TODO: vm_munmap the allocation */
+		mmput(mm);
+		return -ENOMEM;
+	}
+
+	sa->pages = kvmalloc_array(nr_pages, sizeof(struct page *),
+				   GFP_KERNEL | __GFP_ZERO);
+	if (!sa->pages) {
+		kfree(sa);
+		mmput(mm);
+		return -ENOMEM;
+	}
+
+	/* Step 2: pin every page so they survive VMA removal */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+	pinned = get_user_pages_remote(mm, ctx.addr_out, nr_pages,
+				       FOLL_GET | FOLL_WRITE,
+				       sa->pages, NULL);
+#else
+	pinned = get_user_pages_remote(mm, ctx.addr_out, nr_pages,
+				       FOLL_GET | FOLL_WRITE, 0,
+				       sa->pages, NULL);
+#endif
+	if (pinned != (long)nr_pages) {
+		unsigned int i;
+
+		pr_err("snakedrv: shadow pin failed: got %ld/%u pages\n",
+		       pinned, nr_pages);
+		for (i = 0; i < (pinned > 0 ? pinned : 0); i++)
+			put_page(sa->pages[i]);
+		kvfree(sa->pages);
+		kfree(sa);
+		mmput(mm);
+		return -EFAULT;
+	}
+
+	/* Step 3: hide VMA — pages stay mapped via PTEs + pin */
+	injector_hide_vma(mm, ctx.addr_out);
+
+	sa->mm       = mm;   /* hold mm ref for lifetime */
+	sa->pid      = info->pid;
+	sa->vaddr    = ctx.addr_out;
+	sa->size     = size;
+	sa->nr_pages = nr_pages;
+
+	mutex_lock(&shadow_mutex);
+	list_add(&sa->list, &shadow_list);
+	mutex_unlock(&shadow_mutex);
+
+	info->address = ctx.addr_out;
+	info->result  = 0;
+
+	pr_info("snakedrv: shadow alloc %u pages at 0x%lx pid=%d (pinned+hidden)\n",
+		nr_pages, ctx.addr_out, info->pid);
+	return 0;
+}
+
+/**
+ * injector_shadow_write - Write data directly to pinned pages via kmap
+ *
+ * Bypasses access_process_vm (which needs a VMA).
+ */
+ssize_t injector_shadow_write(struct snake_shadow_write *info)
+{
+	struct shadow_alloc_entry *sa;
+	unsigned long offset;
+	void __user *ubuf;
+	ssize_t written = 0;
+
+	mutex_lock(&shadow_mutex);
+	sa = shadow_find_entry(info->pid, info->address);
+	mutex_unlock(&shadow_mutex);
+	if (!sa)
+		return -ENOENT;
+
+	offset = info->address - sa->vaddr;
+	ubuf   = (void __user *)info->user_buffer;
+	if (offset + info->size > sa->size)
+		return -ERANGE;
+
+	while (written < (ssize_t)info->size) {
+		unsigned int pidx = (offset + written) >> PAGE_SHIFT;
+		unsigned int poff = (offset + written) & (PAGE_SIZE - 1);
+		size_t chunk = min_t(size_t, PAGE_SIZE - poff,
+				     info->size - written);
+		void *kaddr;
+
+		if (pidx >= sa->nr_pages)
+			break;
+
+		kaddr = kmap_local_page(sa->pages[pidx]);
+		if (copy_from_user(kaddr + poff, ubuf + written, chunk)) {
+			kunmap_local(kaddr);
+			return written ? written : -EFAULT;
+		}
+		kunmap_local(kaddr);
+		written += chunk;
+	}
+
+	return written;
+}
+
+/**
+ * injector_shadow_read - Read from pinned pages (kernel-internal)
+ *
+ * Returns -ENOENT if addr is not in any shadow allocation.
+ */
+ssize_t injector_shadow_read(pid_t pid, uint64_t addr, void *buf, size_t len)
+{
+	struct shadow_alloc_entry *sa;
+	unsigned long offset;
+	ssize_t done = 0;
+
+	mutex_lock(&shadow_mutex);
+	sa = shadow_find_entry(pid, (unsigned long)addr);
+	mutex_unlock(&shadow_mutex);
+	if (!sa)
+		return -ENOENT;
+
+	offset = (unsigned long)addr - sa->vaddr;
+	if (offset + len > sa->size)
+		len = sa->size - offset;
+
+	while (done < (ssize_t)len) {
+		unsigned int pidx = (offset + done) >> PAGE_SHIFT;
+		unsigned int poff = (offset + done) & (PAGE_SIZE - 1);
+		size_t chunk = min_t(size_t, PAGE_SIZE - poff, len - done);
+		void *kaddr;
+
+		if (pidx >= sa->nr_pages)
+			break;
+
+		kaddr = kmap_local_page(sa->pages[pidx]);
+		memcpy(buf + done, kaddr + poff, chunk);
+		kunmap_local(kaddr);
+		done += chunk;
+	}
+
+	return done;
+}
+
+/**
+ * injector_shadow_free - Unpin pages and release tracking
+ */
+int injector_shadow_free(struct snake_shadow_alloc *info)
+{
+	struct shadow_alloc_entry *sa = NULL, *iter;
+
+	mutex_lock(&shadow_mutex);
+	list_for_each_entry(iter, &shadow_list, list) {
+		if (iter->pid == info->pid &&
+		    iter->vaddr == info->address) {
+			sa = iter;
+			list_del(&sa->list);
+			break;
+		}
+	}
+	mutex_unlock(&shadow_mutex);
+	if (!sa)
+		return -ENOENT;
+
+	shadow_teardown_entry(sa);
+	pr_info("snakedrv: shadow free 0x%llx pid=%d\n",
+		info->address, info->pid);
+	return 0;
+}
+
+void injector_shadow_cleanup_pid(pid_t pid)
+{
+	struct shadow_alloc_entry *sa, *tmp;
+	LIST_HEAD(condemned);
+
+	mutex_lock(&shadow_mutex);
+	list_for_each_entry_safe(sa, tmp, &shadow_list, list) {
+		if (sa->pid == pid) {
+			list_del(&sa->list);
+			list_add(&sa->list, &condemned);
+		}
+	}
+	mutex_unlock(&shadow_mutex);
+
+	list_for_each_entry_safe(sa, tmp, &condemned, list) {
+		list_del(&sa->list);
+		pr_info("snakedrv: shadow cleanup 0x%lx pid=%d\n",
+			sa->vaddr, sa->pid);
+		shadow_teardown_entry(sa);
+	}
+}
+
+void injector_shadow_cleanup_all(void)
+{
+	struct shadow_alloc_entry *sa, *tmp;
+
+	mutex_lock(&shadow_mutex);
+	list_for_each_entry_safe(sa, tmp, &shadow_list, list) {
+		list_del(&sa->list);
+		shadow_teardown_entry(sa);
+	}
+	mutex_unlock(&shadow_mutex);
 }

@@ -1,0 +1,34 @@
+# Build artifacts
+*.o
+*.ko
+*.mod
+*.mod.c
+*.symvers
+*.order
+.*.cmd
+.tmp_versions/
+
+# Kernel build
+kernel/Module.symvers
+kernel/modules.order
+kernel/snakedrv.ko
+kernel/snakedrv.mod
+kernel/snakedrv.mod.c
+kernel/snakedrv.mod.o
+kernel/snakedrv.o
+kernel/snakedrv_*.o
+kernel/.module-common.o
+kernel/module-common.o
+
+# Userland build
+userland/build/
+userland/libsnakedrv.so
+
+# SELinux build artifacts
+security/tmp/
+
+# Tests (excluded from repo)
+tests/
+
+# Engine (excluded from repo)
+Engine/

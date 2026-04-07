@@ -148,7 +148,12 @@ DebugEvent DebugEvent::from_kernel(const snake_debug_event& k) {
     e.isWrite = (k.access_type == SNAKE_BP_TYPE_WRITE);
     e.accessSize = k.access_size;
     e.registers = Registers::from_kernel(k.regs);
-    e.instruction.assign(k.instruction, k.instruction + k.instruction_len);
+    {
+        /* Clamp to the fixed-size kernel array to prevent over-read */
+        uint32_t safe_len = std::min(k.instruction_len,
+                                     static_cast<uint32_t>(sizeof(k.instruction)));
+        e.instruction.assign(k.instruction, k.instruction + safe_len);
+    }
     e.timestamp = std::chrono::nanoseconds(k.timestamp);
     e.sequence = k.sequence;
     return e;
@@ -424,9 +429,14 @@ bool Driver::writeBytes(Address address, const std::vector<uint8_t>& data) {
  * Driver::readString - Read a null-terminated string
  */
 std::string Driver::readString(Address address, size_t maxLength) {
-    std::vector<char> buffer(maxLength + 1);
-    size_t read = readMemory(address, buffer.data(), maxLength);
-    buffer[read] = '\0';
+    std::vector<char> buffer(maxLength + 1, '\0');
+    size_t bytesRead = readMemory(address, buffer.data(), maxLength);
+
+    /* Defensive: clamp to allocated size to prevent OOB write */
+    if (bytesRead > maxLength)
+        bytesRead = maxLength;
+    buffer[bytesRead] = '\0';
+
     return std::string(buffer.data());
 }
 
@@ -720,13 +730,20 @@ void Driver::startEventLoop() {
     impl_->event_loop_running = true;
     impl_->event_thread = std::thread([this]() {
         while (impl_->event_loop_running) {
-            auto events = pollEvents(16, std::chrono::milliseconds(100));
-            
-            std::lock_guard<std::mutex> lock(impl_->callback_mutex);
-            if (impl_->event_callback) {
-                for (const auto& event : events) {
-                    impl_->event_callback(event);
+            try {
+                auto events = pollEvents(16,
+                    std::chrono::milliseconds(100));
+
+                std::lock_guard<std::mutex> lock(
+                    impl_->callback_mutex);
+                if (impl_->event_callback) {
+                    for (const auto& event : events) {
+                        impl_->event_callback(event);
+                    }
                 }
+            } catch (const std::exception& e) {
+                /* Don't let a callback exception kill the loop */
+                (void)e;
             }
         }
     });

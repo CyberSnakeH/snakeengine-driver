@@ -554,6 +554,28 @@ void ElfParser::collect_imports() {
         }
     }
 
+    /* Collect .init_array entries from DT_INIT_ARRAY / DT_INIT_ARRAYSZ */
+    {
+        uint64_t init_arr_addr = 0, init_arr_sz = 0;
+        for (size_t i = 0; i < dyn_size; i++) {
+            if (dyn[i].d_tag == DT_INIT_ARRAY)
+                init_arr_addr = dyn[i].d_un.d_ptr;
+            if (dyn[i].d_tag == DT_INIT_ARRAYSZ)
+                init_arr_sz = dyn[i].d_un.d_val;
+        }
+        if (init_arr_addr && init_arr_sz) {
+            uint64_t *arr = (uint64_t *)vaddr_to_ptr(init_arr_addr);
+            size_t count = init_arr_sz / sizeof(uint64_t);
+            if (arr) {
+                for (size_t i = 0; i < count; i++) {
+                    if (arr[i] != 0)
+                        image.init_array.push_back(arr[i]);
+                }
+                LOG_DBG("Found %zu .init_array entries", image.init_array.size());
+            }
+        }
+    }
+
     // Process DT_JMPREL (PLT Relocations - Functions)
     if (jmprel_offset != 0 && jmprel_sz > 0) {
         Elf64_Rela* rela = (Elf64_Rela*)vaddr_to_ptr(jmprel_offset);
@@ -638,14 +660,43 @@ bool ElfParser::relocate_base(uint64_t target_base) {
 
     for (size_t i = 0; i < count; i++) {
         uint32_t type = ELF64_R_TYPE(rela[i].r_info);
-        
-        // Handle R_X86_64_RELATIVE (Base Address Slide)
-        if (type == R_X86_64_RELATIVE) {
-            uint64_t* target = (uint64_t*)vaddr_to_ptr(rela[i].r_offset);
-            if (target) {
-                *target = target_base + rela[i].r_addend;
-                rel_count++;
-            }
+        uint64_t *target = (uint64_t *)vaddr_to_ptr(rela[i].r_offset);
+
+        if (!target)
+            continue;
+
+        switch (type) {
+        case R_X86_64_RELATIVE:
+            /* Base address slide: S + A where S = target_base */
+            *target = target_base + rela[i].r_addend;
+            rel_count++;
+            break;
+
+        case R_X86_64_64: {
+            /*
+             * Absolute 64-bit: S + A where S = symbol value.
+             * The GOT entry was already patched by resolve_imports
+             * with the remote symbol address.  We just add the
+             * addend (usually 0).
+             */
+            *target += rela[i].r_addend;
+            rel_count++;
+            break;
+        }
+
+        case R_X86_64_GLOB_DAT:
+        case R_X86_64_JUMP_SLOT:
+            /*
+             * These are handled in resolve_imports() which patches
+             * the GOT/PLT entry directly.  After resolve_imports,
+             * the entry already contains the resolved remote address.
+             * We still need to add target_base for internal symbols
+             * (done via internal_relocs below).
+             */
+            break;
+
+        default:
+            break;
         }
     }
     
@@ -680,8 +731,9 @@ bool ElfParser::resolve_imports(RemoteReader& reader) {
         uint64_t remote_addr = driver_reader->resolve_symbol_in_remote_modules(imp.name);
         
         if (remote_addr == 0) {
-            LOG_ERR("Failed to resolve symbol: %s", imp.name.c_str());
-            continue; // Fail soft?
+            LOG_ERR("FATAL: unresolved symbol: %s (GOT entry will be NULL → crash)",
+                    imp.name.c_str());
+            return false;
         }
         
         // Patch the GOT/PLT entry in our LOCAL raw image
@@ -792,102 +844,91 @@ public:
         
         const auto& img = parser.get_image();
         
-        // 1. Allocate
-        struct snake_inject_alloc alloc = {0};
-        alloc.pid = target_pid;
-        alloc.size = img.total_size;
-        alloc.protection = SNAKE_PROT_READ | SNAKE_PROT_WRITE | SNAKE_PROT_EXEC; // Stealth applied later
-        alloc.address = 0;
-        alloc.result = 0;
-        
-        if (ioctl(driver_fd, SNAKE_IOCTL_INJECT_ALLOC, &alloc) < 0 || alloc.result < 0) {
-            LOG_ERR("Kernel allocation failed: %d", alloc.result);
+        /*
+         * Step 1: Allocate RWX memory in target (normal VMA path).
+         * Visible in /proc/pid/maps until stealth is applied.
+         */
+        struct snake_inject_alloc alloc{};
+        alloc.pid        = target_pid;
+        alloc.size       = img.total_size;
+        alloc.protection = SNAKE_PROT_READ | SNAKE_PROT_WRITE | SNAKE_PROT_EXEC;
+
+        if (ioctl(driver_fd, SNAKE_IOCTL_INJECT_ALLOC, &alloc) < 0 ||
+            alloc.result < 0) {
+            LOG_ERR("Allocation failed: %d", alloc.result);
             return false;
         }
-        LOG_INFO("Allocated at 0x%lx", alloc.address);
-        
-        // 2. Resolve Imports (The hard part)
+        LOG_INFO("Allocated at 0x%lx (%zu bytes)", alloc.address, img.total_size);
+
+        /* Step 2: Resolve imports from target's loaded modules */
         DriverRemoteReader reader(driver_fd, target_pid);
-        parser.resolve_imports(reader);
-        
-        // 3. Relocate Base (R_X86_64_RELATIVE)
+        if (!parser.resolve_imports(reader)) {
+            LOG_ERR("Import resolution failed");
+            return false;
+        }
+
+        /* Step 3: Apply base relocations */
         if (!parser.relocate_base(alloc.address)) {
             LOG_ERR("Failed to apply base relocations");
             return false;
         }
-        
-        // 4. Write (Chunked to respect driver limit of 1MB)
-        uint8_t* src_ptr = (uint8_t*)img.raw_image.data();
+
+        /* Step 4: Write payload via WRITE_MEMORY (chunked, 1MB max) */
+        const uint8_t *src_ptr = img.raw_image.data();
         size_t write_remaining = img.total_size;
         uint64_t write_addr = alloc.address;
         const size_t MAX_WRITE_CHUNK = 1024 * 1024;
 
         while (write_remaining > 0) {
-            size_t chunk = (write_remaining > MAX_WRITE_CHUNK) ? MAX_WRITE_CHUNK : write_remaining;
-            
-            struct snake_memory_op mem_op = {0};
-            mem_op.pid = target_pid;
-            mem_op.address = write_addr;
-            mem_op.size = chunk;
-            mem_op.user_buffer = (uint64_t)src_ptr;
-            mem_op.result = 0;
-            mem_op.flags = 0;
-            
-            if (ioctl(driver_fd, SNAKE_IOCTL_WRITE_MEMORY, &mem_op) < 0 || mem_op.result != (int32_t)chunk) {
-                LOG_ERR("Failed to write payload chunk at %lx size %zu. Ret: %d, Errno: %s", 
-                        write_addr, chunk, mem_op.result, strerror(errno));
+            size_t chunk = std::min(write_remaining, MAX_WRITE_CHUNK);
+
+            struct snake_memory_op wop{};
+            wop.pid         = target_pid;
+            wop.address     = write_addr;
+            wop.size        = chunk;
+            wop.user_buffer = reinterpret_cast<uint64_t>(src_ptr);
+
+            if (ioctl(driver_fd, SNAKE_IOCTL_WRITE_MEMORY, &wop) < 0 ||
+                wop.result != static_cast<int32_t>(chunk)) {
+                LOG_ERR("Write at 0x%lx size %zu failed: %d (%s)",
+                        write_addr, chunk, wop.result, strerror(errno));
                 return false;
             }
-            
-            src_ptr += chunk;
-            write_addr += chunk;
+
+            src_ptr         += chunk;
+            write_addr      += chunk;
             write_remaining -= chunk;
         }
-        
-        LOG_INFO("Payload written successfully (%zu bytes)", img.total_size);
-        
-        // 4.5 Apply Stealth (Unlink VMA)
-        // Now that we have written the data, we can hide the VMA.
-        // The pages should remain accessible via TLB/Pagetables for execution?
-        // WARNING: If the kernel reclaims these pages or we get a page fault, we crash.
-        // But for a loaded library, faults shouldn't happen if everything is resident.
-        // We might need to mlock() or similar before hiding.
-        // For now, let's just hide.
-        struct snake_inject_protect stealth_op = {0};
-        stealth_op.pid = target_pid;
-        stealth_op.address = alloc.address;
-        stealth_op.size = 0;
-        stealth_op.protection = 0;
-        stealth_op.result = 0;
-        
-        if (ioctl(driver_fd, SNAKE_IOCTL_INJECT_STEALTH, &stealth_op) < 0) {
-            LOG_ERR("Failed to apply stealth mode");
-        } else {
-            LOG_INFO("Stealth mode activated (VMA unlinked)");
-        }
-        
-        // 5. Execute
-        struct snake_inject_thread thread = {0};
+
+        LOG_INFO("Payload written (%zu bytes)", img.total_size);
+
+        /*
+         * Stealth (VMA hide) is deferred — applying it before
+         * execution causes SIGSEGV on TLB misses. The payload can
+         * request stealth later via ioctl once fully initialized.
+         *
+         * TODO: implement deferred stealth from within ManualMapEntry
+         * after all pages have been faulted in (mlock equivalent).
+         */
+
+        /* Step 6: Execute ManualMapEntry via thread hijack */
+        struct snake_inject_thread thread{};
         thread.pid = target_pid;
-        thread.result = 0;
-        thread.start_address = 0; // Will be set below
-        thread.argument = 0; // No argument for ManualMapEntry currently
-        
-        // Try to find Manual Entry Point first
+
         uint64_t manual_entry = parser.get_symbol_offset("ManualMapEntry");
         if (manual_entry != 0) {
-            LOG_INFO("Using manual entry point at offset +0x%lx", manual_entry);
+            LOG_INFO("Entry: ManualMapEntry at +0x%lx", manual_entry);
             thread.start_address = alloc.address + manual_entry;
         } else {
-            LOG_INFO("Using ELF entry point at offset +0x%lx", img.entry_point);
+            LOG_INFO("Entry: ELF entry at +0x%lx", img.entry_point);
             thread.start_address = alloc.address + img.entry_point;
         }
-        
+
         if (ioctl(driver_fd, SNAKE_IOCTL_INJECT_THREAD, &thread) < 0) {
             LOG_ERR("Thread creation failed");
             return false;
         }
-        
+
         return true;
     }
 

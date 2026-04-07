@@ -11,6 +11,7 @@
  */
 
 #include <linux/kernel.h>
+#include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
@@ -18,6 +19,11 @@
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+#include <linux/unaligned.h>
+#else
+#include <asm/unaligned.h>
+#endif
 
 /* Include userland header for shared types */
 #include "../userland/include/snakedrv_scanner.h"
@@ -395,6 +401,15 @@ struct scan_result_set *scanner_create_result_set(uint32_t max_results)
 	struct scan_result_set *set;
 	bool use_bloom = false;
 
+	/*
+	 * Hard cap: prevent unbounded kernel allocation from userland.
+	 * 10M results × 16 bytes = 160 MB — already aggressive.
+	 */
+	if (max_results == 0)
+		return NULL;
+	if (max_results > 10000000)
+		max_results = 10000000;
+
 	set = kzalloc(sizeof(*set), GFP_KERNEL);
 	if (!set)
 		return NULL;
@@ -535,81 +550,78 @@ static bool __maybe_unused scanner_address_in_set(struct scan_result_set *set, u
  */
 static void parallel_scan_worker(struct work_struct *work)
 {
-	struct parallel_scan_work *psw = container_of(work, struct parallel_scan_work, work);
+	struct parallel_scan_work *psw = container_of(work,
+					struct parallel_scan_work, work);
 	uint64_t addr = psw->start_addr;
 	uint64_t end_addr = psw->end_addr;
-	uint8_t *scan_buf;
+	uint8_t *alloc_buf;   /* original allocation — for kvfree */
+	uint8_t *scan_buf;    /* cache-aligned working pointer */
 	size_t buf_size;
 	ssize_t bytes_read;
 	ssize_t matches = 0;
 
-	/* Allocate worker-local scan buffer */
 	buf_size = select_optimal_chunk_size(end_addr - addr);
-	scan_buf = kvmalloc(buf_size + SNAKEDRV_CACHE_LINE_SIZE, GFP_KERNEL);
-	if (!scan_buf) {
-		pr_err("snakedrv: Worker %d failed to allocate buffer\n", psw->worker_id);
+	alloc_buf = kvmalloc(buf_size + SNAKEDRV_CACHE_LINE_SIZE, GFP_KERNEL);
+	if (!alloc_buf) {
+		pr_err("snakedrv: Worker %d: buffer alloc failed\n",
+		       psw->worker_id);
 		psw->matches = -ENOMEM;
 		complete(psw->completion);
 		return;
 	}
 
-	scan_buf = (uint8_t *)cache_align_up((unsigned long)scan_buf);
+	scan_buf = (uint8_t *)cache_align_up((unsigned long)alloc_buf);
 
-	pr_debug("snakedrv: Worker %d scanning 0x%llx to 0x%llx\n",
-	         psw->worker_id, addr, end_addr);
+	pr_debug("snakedrv: Worker %d scanning 0x%llx..0x%llx\n",
+		 psw->worker_id, addr, end_addr);
 
-	/* Scan assigned chunk */
 	while (addr < end_addr) {
 		size_t chunk_size = min_t(size_t, buf_size, end_addr - addr);
 		size_t i;
 
-		/* Read chunk from memory */
-		bytes_read = backend_read(psw->backend, addr, scan_buf, chunk_size);
+		bytes_read = backend_read(psw->backend, addr,
+					  scan_buf, chunk_size);
 		if (bytes_read <= 0) {
 			addr += PAGE_SIZE;
 			continue;
 		}
 
-		/* Prefetch and scan */
 		prefetch_scan_data(scan_buf);
 
-		for (i = 0; i < bytes_read; i += (psw->params.aligned ? psw->params.value_size : 1)) {
+		for (i = 0; i < bytes_read;
+		     i += (psw->params.aligned
+				? psw->params.value_size : 1)) {
 			uint64_t current_value = 0;
-			bool match = false;
 
-			/* Prefetch next cache line */
-			if ((i & (SNAKEDRV_CACHE_LINE_SIZE - 1)) == 0) {
-				prefetch_scan_data(scan_buf + i + SNAKEDRV_PREFETCH_DISTANCE);
-			}
+			if ((i & (SNAKEDRV_CACHE_LINE_SIZE - 1)) == 0)
+				prefetch_scan_data(scan_buf + i +
+					SNAKEDRV_PREFETCH_DISTANCE);
 
-			/* Extract value based on size */
 			switch (psw->params.value_size) {
 			case 1:
 				current_value = scan_buf[i];
 				break;
 			case 2:
-				if (i + 2 <= bytes_read)
-					current_value = *(uint16_t *)(scan_buf + i);
+				if (likely(i + 2 <= bytes_read))
+					current_value = get_unaligned(
+						(uint16_t *)(scan_buf + i));
 				break;
 			case 4:
-				if (i + 4 <= bytes_read)
-					current_value = *(uint32_t *)(scan_buf + i);
+				if (likely(i + 4 <= bytes_read))
+					current_value = get_unaligned(
+						(uint32_t *)(scan_buf + i));
 				break;
 			case 8:
-				if (i + 8 <= bytes_read)
-					current_value = *(uint64_t *)(scan_buf + i);
+				if (likely(i + 8 <= bytes_read))
+					current_value = get_unaligned(
+						(uint64_t *)(scan_buf + i));
 				break;
 			}
 
-			/* Check for match */
-			match = (current_value == psw->params.search_value);
-
-			if (match) {
-				/* Add to shared result set (thread-safe) */
-				if (scanner_add_result(psw->results, addr + i, current_value) < 0) {
-					/* Result set full, stop scanning */
+			if (current_value == psw->params.search_value) {
+				if (scanner_add_result(psw->results,
+						addr + i, current_value) < 0)
 					goto worker_done;
-				}
 				matches++;
 			}
 		}
@@ -618,12 +630,11 @@ static void parallel_scan_worker(struct work_struct *work)
 	}
 
 worker_done:
-	kvfree(scan_buf);
+	kvfree(alloc_buf);
 	psw->matches = matches;
 
-	pr_debug("snakedrv: Worker %d completed: %zd matches\n", psw->worker_id, matches);
-
-	/* Signal completion */
+	pr_debug("snakedrv: Worker %d: %zd matches\n",
+		 psw->worker_id, matches);
 	complete(psw->completion);
 }
 

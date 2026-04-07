@@ -42,6 +42,9 @@
 #include <linux/mmu_context.h>
 #include <linux/cred.h>
 #include <linux/thread_info.h>
+#include <linux/capability.h>
+#include <linux/security.h>
+#include <linux/overflow.h>
 #include <asm/processor.h>
 
 /* Include shared headers with userland */
@@ -163,6 +166,9 @@ struct event_entry {
     struct snake_debug_event event;
 };
 
+/* Forward declaration — used by put_proc before definition */
+static void cleanup_breakpoints(struct attached_proc *p);
+
 /* ============================================================================
  * Process Management
  * ============================================================================ */
@@ -190,8 +196,23 @@ static struct attached_proc *get_proc(pid_t pid)
 
 static void put_proc(struct attached_proc *p)
 {
-    if (p)
-        atomic_dec(&p->refcount);
+    if (!p)
+        return;
+
+    if (atomic_dec_and_test(&p->refcount)) {
+        cleanup_breakpoints(p);
+        /*
+         * Do NOT call injector_shadow_cleanup_pid here.
+         * Shadow memory must persist after detach — injected code
+         * is still running in it.  Cleanup happens only on:
+         *   - Explicit SHADOW_FREE ioctl
+         *   - Module unload (injector_shadow_cleanup_all)
+         *   - Target process exit (pages released by mm teardown)
+         */
+        if (p->backend)
+            backend_put(p->backend);
+        kfree(p);
+    }
 }
 
 static void cleanup_breakpoints(struct attached_proc *p)
@@ -261,8 +282,16 @@ static int do_query_regions(pid_t pid, struct snake_memory_query __user *uquery)
     
     if (query.max_regions == 0 || query.max_regions > 4096)
         return -EINVAL;
-    
-    regions = kvzalloc(sizeof(*regions) * query.max_regions, GFP_KERNEL);
+
+    {
+        size_t alloc_size;
+
+        if (check_mul_overflow(sizeof(*regions),
+                               (size_t)query.max_regions, &alloc_size))
+            return -EOVERFLOW;
+
+        regions = kvzalloc(alloc_size, GFP_KERNEL);
+    }
     if (!regions)
         return -ENOMEM;
     
@@ -312,9 +341,10 @@ static int do_query_regions(pid_t pid, struct snake_memory_query __user *uquery)
             regions[count].inode = 0;
             
             if (vma->vm_file) {
-                char *tmp = kmalloc(256, GFP_KERNEL);
+                char *tmp = kmalloc(PATH_MAX, GFP_KERNEL);
                 if (tmp) {
-                    char *path = d_path(&vma->vm_file->f_path, tmp, 256);
+                    char *path = d_path(&vma->vm_file->f_path,
+                                        tmp, PATH_MAX);
                     if (!IS_ERR(path))
                         strscpy(regions[count].pathname, path,
                                sizeof(regions[count].pathname));
@@ -492,7 +522,16 @@ static int do_virt_to_phys(struct attached_proc *p, struct snake_virt_to_phys *v
     vtp->phys_address = page_to_phys(page) + (vtp->virt_address & (PAGE_SIZE - 1));
     vtp->page_offset = vtp->virt_address & (PAGE_SIZE - 1);
     vtp->page_size = PAGE_SIZE;
-    vtp->flags = page->flags;
+    /*
+     * On kernel 6.10+ page->flags is memdesc_flags_t (struct wrapper).
+     * Extract the raw unsigned long and truncate to uint32_t for the
+     * userland ABI.
+     */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
+    vtp->flags = (uint32_t)page->flags.f;
+#else
+    vtp->flags = (uint32_t)page->flags;
+#endif
     vtp->result = SNAKEDRV_SUCCESS;
 
     put_page(page);
@@ -655,11 +694,13 @@ static int fill_process_info(pid_t pid, struct snake_process_info *info)
         info->mm_start_stack = mm->start_stack;
 
         if (mm->exe_file) {
-            char *tmp = kmalloc(256, GFP_KERNEL);
+            char *tmp = kmalloc(PATH_MAX, GFP_KERNEL);
             if (tmp) {
-                char *path = d_path(&mm->exe_file->f_path, tmp, 256);
+                char *path = d_path(&mm->exe_file->f_path,
+                                    tmp, PATH_MAX);
                 if (!IS_ERR(path))
-                    strscpy(info->exe_path, path, sizeof(info->exe_path));
+                    strscpy(info->exe_path, path,
+                           sizeof(info->exe_path));
                 kfree(tmp);
             }
         }
@@ -1061,9 +1102,35 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 {
     void __user *uarg = (void __user *)arg;
     int ret = 0;
-    
+
+    /*
+     * Capability gate: all operations except GET_INFO require
+     * CAP_SYS_PTRACE. Physical memory and injection additionally
+     * require CAP_SYS_ADMIN (ring-0 equivalent operations).
+     */
     switch (cmd) {
-    
+    case SNAKE_IOCTL_GET_INFO:
+        break; /* read-only metadata, no capability needed */
+    case SNAKE_IOCTL_READ_PHYS:
+    case SNAKE_IOCTL_WRITE_PHYS:
+    case SNAKE_IOCTL_INJECT_ALLOC:
+    case SNAKE_IOCTL_INJECT_PROTECT:
+    case SNAKE_IOCTL_INJECT_THREAD:
+    case SNAKE_IOCTL_INJECT_STEALTH:
+    case SNAKE_IOCTL_SHADOW_ALLOC:
+    case SNAKE_IOCTL_SHADOW_WRITE:
+    case SNAKE_IOCTL_SHADOW_FREE:
+        if (!capable(CAP_SYS_ADMIN))
+            return -EPERM;
+        break;
+    default:
+        if (!capable(CAP_SYS_PTRACE))
+            return -EPERM;
+        break;
+    }
+
+    switch (cmd) {
+
     case SNAKE_IOCTL_GET_INFO: {
         struct snake_driver_info info = {0};
         
@@ -1163,20 +1230,22 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             if (p) {
                 list_del(&p->list);
                 atomic_dec(&attached_count);
-                mutex_unlock(&attach_mutex);
+            }
+            mutex_unlock(&attach_mutex);
 
-                cleanup_breakpoints(p);
-
-                /* Release backend */
-                if (p->backend)
-                    backend_put(p->backend);
-
-                kfree(p);
+            if (p) {
+                /*
+                 * Drop the list's reference. put_proc handles
+                 * cleanup_breakpoints + backend_put + kfree
+                 * atomically when refcount reaches zero.
+                 * If a concurrent ioctl still holds a reference,
+                 * the actual free is deferred until that put_proc.
+                 */
+                put_proc(p);
 
                 ctrl.result = SNAKEDRV_SUCCESS;
                 SDRV_INFO("Detached from PID %d\n", ctrl.pid);
             } else {
-                mutex_unlock(&attach_mutex);
                 ctrl.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             }
 
@@ -1234,20 +1303,27 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             put_proc(p);
             return -ENOMEM;
         }
-        
-        bytes = do_read_memory(p, op.address, kbuf, op.size);
-        
+
+        /*
+         * Try shadow read first — if the address falls in a
+         * shadow allocation, access_process_vm won't work
+         * (no VMA).  Fall back to the normal backend path.
+         */
+        bytes = injector_shadow_read(op.pid, op.address, kbuf, op.size);
+        if (bytes == -ENOENT)
+            bytes = do_read_memory(p, op.address, kbuf, op.size);
+
         if (bytes > 0) {
             if (copy_to_user((void __user *)op.user_buffer, kbuf, bytes))
                 bytes = -EFAULT;
         }
-        
+
         op.result = (int)bytes;
         if (copy_to_user(uarg, &op, sizeof(op)))
             ret = -EFAULT;
         else
             ret = (bytes > 0) ? 0 : (int)bytes;
-        
+
         kvfree(kbuf);
         put_proc(p);
         break;
@@ -1949,6 +2025,48 @@ skip_vma_scan:
         break;
     }
 
+    /* ================================================================
+     * Shadow Memory (VMA-less PTE mapping)
+     * ================================================================ */
+
+    case SNAKE_IOCTL_SHADOW_ALLOC: {
+        struct snake_shadow_alloc sa;
+
+        if (copy_from_user(&sa, uarg, sizeof(sa)))
+            return -EFAULT;
+        ret = injector_shadow_alloc(&sa);
+        sa.result = ret;
+        if (copy_to_user(uarg, &sa, sizeof(sa)))
+            return -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_SHADOW_WRITE: {
+        struct snake_shadow_write sw;
+        ssize_t written;
+
+        if (copy_from_user(&sw, uarg, sizeof(sw)))
+            return -EFAULT;
+        written = injector_shadow_write(&sw);
+        sw.result = (int32_t)written;
+        if (copy_to_user(uarg, &sw, sizeof(sw)))
+            return -EFAULT;
+        ret = (written >= 0) ? 0 : (int)written;
+        break;
+    }
+
+    case SNAKE_IOCTL_SHADOW_FREE: {
+        struct snake_shadow_alloc sa;
+
+        if (copy_from_user(&sa, uarg, sizeof(sa)))
+            return -EFAULT;
+        ret = injector_shadow_free(&sa);
+        sa.result = ret;
+        if (copy_to_user(uarg, &sa, sizeof(sa)))
+            return -EFAULT;
+        break;
+    }
+
     default:
         SDRV_ERR("Unknown IOCTL: 0x%x\n", cmd);
         ret = -ENOTTY;
@@ -2109,6 +2227,9 @@ static void __exit snakedrv_exit(void)
         kfree(e);
     }
     spin_unlock(&event_lock);
+
+    /* Cleanup all shadow allocations */
+    injector_shadow_cleanup_all();
 
     /* Cleanup scanner subsystem */
     snakedrv_scanner_cleanup();

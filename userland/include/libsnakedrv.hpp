@@ -17,6 +17,7 @@
 #include <chrono>
 #include <optional>
 #include <cstdint>
+#include <type_traits>
 
 #include "snakedrv.h"
 
@@ -197,13 +198,18 @@ struct MemoryRegion {
      * end - Return the end address of the region (exclusive)
      * @return base + size
      */
-    Address end() const { return base + size; }
+    Address end() const {
+        /* Saturate instead of wrapping on overflow */
+        return (base + size < base) ? UINT64_MAX : base + size;
+    }
     /**
      * contains - Check whether an address lies inside the region
      * @addr: Address to test
      * @return true if addr is within [base, end)
      */
-    bool contains(Address addr) const { return addr >= base && addr < end(); }
+    bool contains(Address addr) const {
+        return addr >= base && addr < end();
+    }
     /**
      * isReadable - Check whether the region is readable
      * @return true if readable
@@ -578,26 +584,30 @@ public:
      */
     size_t writeMemory(Address address, const void* buffer, size_t size);
     
-    template<typename T>
     /**
-     * read - Read a typed value from the attached process
+     * read - Read a trivially-copyable value from the attached process
      * @address: Target address
-     * @return Value read
+     * @return Value read (zero-initialized on failure)
      */
+    template<typename T>
     T read(Address address) {
+        static_assert(std::is_trivially_copyable_v<T>,
+                      "read<T>: T must be trivially copyable");
         T value{};
         readMemory(address, &value, sizeof(T));
         return value;
     }
-    
-    template<typename T>
+
     /**
-     * write - Write a typed value to the attached process
+     * write - Write a trivially-copyable value to the attached process
      * @address: Target address
      * @value: Value to write
      * @return true if all bytes were written
      */
+    template<typename T>
     bool write(Address address, const T& value) {
+        static_assert(std::is_trivially_copyable_v<T>,
+                      "write<T>: T must be trivially copyable");
         return writeMemory(address, &value, sizeof(T)) == sizeof(T);
     }
     

@@ -61,6 +61,9 @@ struct ElfImage {
     // Internal relocations (GOT entries pointing to internal symbols)
     // These just need "Base Address" added to them.
     std::vector<uint64_t> internal_relocs;
+
+    /* .init_array entries (constructor function offsets from base) */
+    std::vector<uint64_t> init_array;
 };
 
 /**

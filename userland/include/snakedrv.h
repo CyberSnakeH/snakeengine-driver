@@ -490,6 +490,50 @@ struct snake_inject_thread {
 #define SNAKE_IOCTL_INJECT_STEALTH  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x63, struct snake_inject_protect)
 
 /* ============================================================================
+ * Shadow Memory (VMA-less Direct PTE Mapping)
+ *
+ * Allocates physical pages and maps them via direct PTE manipulation,
+ * completely bypassing VMA creation.  The mapping is invisible to
+ * /proc/pid/maps, /proc/pid/smaps, and core dumps.
+ * ============================================================================ */
+
+/**
+ * struct snake_shadow_alloc - Shadow memory allocation request
+ * @pid:        Target process ID
+ * @size:       Requested size (will be page-aligned)
+ * @protection: SNAKE_PROT_* flags
+ * @address:    [out] Virtual address allocated in target
+ * @result:     [out] 0 on success, negative errno on failure
+ */
+struct snake_shadow_alloc {
+    pid_t           pid;
+    uint64_t        size;
+    uint32_t        protection;
+    uint64_t        address;
+    int32_t         result;
+} __attribute__((packed));
+
+/**
+ * struct snake_shadow_write - Write to shadow memory region
+ * @pid:         Target process ID
+ * @address:     Destination address (within a shadow allocation)
+ * @size:        Bytes to write
+ * @user_buffer: Source buffer in caller address space
+ * @result:      [out] Bytes written, or negative errno
+ */
+struct snake_shadow_write {
+    pid_t           pid;
+    uint64_t        address;
+    uint64_t        size;
+    uint64_t        user_buffer;
+    int32_t         result;
+} __attribute__((packed));
+
+#define SNAKE_IOCTL_SHADOW_ALLOC  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x68, struct snake_shadow_alloc)
+#define SNAKE_IOCTL_SHADOW_WRITE  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x69, struct snake_shadow_write)
+#define SNAKE_IOCTL_SHADOW_FREE   _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x6A, struct snake_shadow_alloc)
+
+/* ============================================================================
  * Netlink Protocol for Async Events
  * ============================================================================ */
 
