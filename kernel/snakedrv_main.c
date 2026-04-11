@@ -523,15 +523,21 @@ static int do_virt_to_phys(struct attached_proc *p, struct snake_virt_to_phys *v
     vtp->page_offset = vtp->virt_address & (PAGE_SIZE - 1);
     vtp->page_size = PAGE_SIZE;
     /*
-     * On kernel 6.10+ page->flags is memdesc_flags_t (struct wrapper).
-     * Extract the raw unsigned long and truncate to uint32_t for the
-     * userland ABI.
+     * struct page->flags typing has changed across kernels:
+     *   - Before the memdesc cleanup series (most kernels ≤ 6.16 and
+     *     every distro that didn't backport it): flags is a raw
+     *     `unsigned long`.
+     *   - After the cleanup (mainline ~6.17+ and Fedora 43's 6.19):
+     *     flags is `memdesc_flags_t`, a struct wrapping one
+     *     `unsigned long f` field.
+     *
+     * Using a LINUX_VERSION_CODE check is unreliable because distros
+     * (Ubuntu 6.17 in particular) cherry-pick the feature independently
+     * from the version bump.  Instead, read the first `unsigned long`
+     * at `&page->flags` — identical layout in both cases because
+     * memdesc_flags_t contains exactly one unsigned long.
      */
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 10, 0)
-    vtp->flags = (uint32_t)page->flags.f;
-#else
-    vtp->flags = (uint32_t)page->flags;
-#endif
+    vtp->flags = (uint32_t)(*(unsigned long *)&page->flags);
     vtp->result = SNAKEDRV_SUCCESS;
 
     put_page(page);

@@ -36,6 +36,28 @@ else
 ccflags-y += -O2
 endif
 
+# ============================================================================
+# Retpoline / Spectre-v2 mitigation flags
+# ============================================================================
+# Some distros (notably Ubuntu ≥ 6.17) enable CONFIG_MITIGATION_RETPOLINE but
+# don't always propagate the compiler flags cleanly to out-of-tree modules —
+# especially when building from a shared folder (virtiofs / vboxsf).
+# The symptom is objtool errors like:
+#   error: objtool: <func>+0xXX: indirect call found in MITIGATION_RETPOLINE build
+#
+# Pull the kernel's auto.conf (which has CONFIG_* as make variables) and
+# force-add the retpoline thunk flags so gcc emits __x86_indirect_thunk_rax
+# calls instead of raw `callq *%rax`.  Do nothing if the target kernel
+# wasn't built with retpoline.
+-include $(KDIR)/include/config/auto.conf
+
+ifeq ($(CONFIG_MITIGATION_RETPOLINE),y)
+ccflags-y += -mindirect-branch=thunk-extern -mindirect-branch-register
+endif
+ifeq ($(CONFIG_RETPOLINE),y)
+ccflags-y += -mindirect-branch=thunk-extern -mindirect-branch-register
+endif
+
 # Module
 obj-m := $(MODULE_NAME).o
 

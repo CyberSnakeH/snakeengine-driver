@@ -177,6 +177,38 @@ sign-module.sh   Secure Boot module signing (MOK)
 
 ## Changelog
 
+### 2.0.1 (2026-04-10)
+
+**Cross-distro kernel build fixes (tested on Ubuntu 24.04 / kernel
+6.17.0-20-generic in a VM, still working on Fedora 43 / kernel 6.19):**
+
+- **`page->flags` type fix**: the previous `LINUX_VERSION_CODE >= 6.10`
+  guard around `page->flags.f` was wrong in both directions.  The
+  `memdesc_flags_t` struct wrapper landed later than 6.10 in mainline
+  and distros cherry-pick it independently of the version bump.
+  Replaced the `#if` with a version-independent
+  `*(unsigned long *)&page->flags` — identical layout in both cases
+  because `memdesc_flags_t` wraps a single `unsigned long`.  Fixes
+  `error: request for member 'f' in something not a structure or union`
+  on Ubuntu 6.17 and similar distros without the backport.
+
+- **Retpoline thunk flags propagated to out-of-tree builds**: Ubuntu
+  kernels with `CONFIG_MITIGATION_RETPOLINE=y` sometimes fail to pass
+  `-mindirect-branch=thunk-extern -mindirect-branch-register` to external
+  modules (especially when building from a shared folder on a VM),
+  causing `objtool: indirect call found in MITIGATION_RETPOLINE build`
+  errors on every function pointer call in the scanner and main driver.
+  `kernel/Makefile` now `-include`s the target kernel's
+  `include/config/auto.conf` and re-adds the retpoline flags explicitly
+  when `CONFIG_MITIGATION_RETPOLINE` (or legacy `CONFIG_RETPOLINE`) is
+  set, so gcc emits `__x86_indirect_thunk_rax` calls instead of raw
+  indirect calls.
+
+- **`deploy.sh build-kernel` target**: new command that builds only
+  the kernel module (skipping userland library, tests, and the ImGui
+  payload).  Useful for cross-testing the driver in a VM where the
+  userland components aren't needed.
+
 ### 2.0.0 (2026-04-07)
 
 **Kernel driver security hardening:**

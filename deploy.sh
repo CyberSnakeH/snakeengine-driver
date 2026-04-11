@@ -935,6 +935,7 @@ Usage: $0 [command] [options]
 Commands:
   deps        Install build dependencies
   build       Build everything (kernel module, userland, tests, payload)
+  build-kernel  Build ONLY the kernel module (VM / cross-test workflow)
   install     Install everything (requires root)
   uninstall   Remove everything (requires root)
   load        Load kernel module (requires root)
@@ -1052,6 +1053,12 @@ case "${COMMAND:-help}" in
         ;;
     build)
         build_all
+        ;;
+    build-kernel)
+        # Kernel module only — useful when cross-testing the driver
+        # in a VM (the userland library and Engine UI aren't needed
+        # to verify the module compiles and loads).
+        build_kernel_module
         ;;
     install)
         install_all
