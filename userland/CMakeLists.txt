@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(libsnakedrv VERSION 2.0.1 LANGUAGES CXX)
+project(libsnakedrv VERSION 2.0.2 LANGUAGES CXX)
 
 # Options
 option(BUILD_SHARED_LIBS "Build shared library" ON)
