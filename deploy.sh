@@ -407,6 +407,14 @@ build_tests() {
     log_info "  - target (simple target process for testing)"
 }
 
+build_tests_if_available() {
+    if [ -d "${SCRIPT_DIR}/tests" ] && [ -f "${SCRIPT_DIR}/tests/Makefile" ]; then
+        build_tests
+    else
+        log_warning "tests/ not found; skipping test-suite build"
+    fi
+}
+
 build_payload() {
     log_info "Building ImGui payload..."
 
@@ -425,6 +433,14 @@ build_payload() {
     make -j"${JOBS}"
 
     log_success "ImGui payload built successfully"
+}
+
+build_payload_if_available() {
+    if [ -d "${SCRIPT_DIR}/tests/payload_imgui" ]; then
+        build_payload
+    else
+        log_warning "tests/payload_imgui not found; skipping ImGui payload build"
+    fi
 }
 
 build_sigstore_verify() {
@@ -446,8 +462,8 @@ build_all() {
 
     build_kernel_module
     build_userland
-    build_tests
-    build_payload
+    build_tests_if_available
+    build_payload_if_available
     build_sigstore_verify
 
     log_success "=== Build completed successfully ==="
@@ -1053,7 +1069,7 @@ Usage: $0 [command] [options]
 
 Commands:
   deps        Install build dependencies
-  build       Build everything (kernel module, userland, tests, payload)
+  build       Build driver, userland, verifier, and optional local tests/payload
   build-kernel  Build ONLY the kernel module (VM / cross-test workflow)
   install     Install everything (requires root)
   uninstall   Remove everything (requires root)
