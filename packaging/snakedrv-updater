@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+#
+# snakedrv-updater — fetch, verify, and install a snakeengine-driver
+# release. Invoked via pkexec from the SnakeEngine UI when the kernel
+# module's ABI is too old, or run manually for a fresh install /
+# downgrade.
+#
+# Usage:
+#   snakedrv-updater <version>
+#   snakedrv-updater --check                 # print latest version
+#   snakedrv-updater --help
+#
+# Argv:
+#   version   semver of the release to install (e.g. 2.1.0). Without
+#             a leading 'v'. The matching git tag is `v<version>`.
+#
+# Behaviour:
+#   1. Download the release tarball + .sigstore bundle from
+#      https://github.com/CyberSnakeH/snakeengine-driver/releases/...
+#   2. Verify the signature with /usr/lib/snakeengine/sigstore-verify
+#      against the cosign-keyless identity pinned below.
+#   3. Stage the source under /usr/src/snakedrv-<version>/, render
+#      dkms.conf with the right version, and either:
+#        a) DKMS path  : dkms remove old + add/autoinstall new
+#        b) Direct path: make -C kernel; cp .ko to /lib/modules/.../extra
+#   4. Install the userland (libsnakedrv.so + headers + pkg-config +
+#      CMake exports).
+#   5. Reload the module and refresh the dynamic-linker cache.
+#
+# Exits non-zero on any failure with a clear message; the SnakeEngine
+# UI surfaces the message verbatim.
+
+set -euo pipefail
+
+# ─── Configuration (must stay in sync with the release pipeline) ───
+readonly REPO='CyberSnakeH/snakeengine-driver'
+readonly IDENTITY_REGEX='^https://github\.com/CyberSnakeH/snakeengine-driver/\.github/workflows/release\.yml@refs/tags/v.*$'
+readonly OIDC_ISSUER='https://token.actions.githubusercontent.com'
+readonly SIGSTORE_VERIFY='/usr/lib/snakeengine/sigstore-verify'
+readonly CURL_CONNECT_TIMEOUT=10
+readonly CURL_MAX_TIME=120
+readonly SIGSTORE_VERIFY_TIMEOUT=120
+
+# ─── Helpers ───────────────────────────────────────────────────────
+log()  { printf '\033[36m[snakedrv-updater]\033[0m %s\n' "$*" >&2; }
+warn() { printf '\033[33m[snakedrv-updater]\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m[snakedrv-updater]\033[0m %s\n' "$*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+Usage: snakedrv-updater <version>
+       snakedrv-updater --check
+       snakedrv-updater --help
+
+Fetch, verify, and install a snakeengine-driver release.
+Requires root; invoke via pkexec or sudo.
+EOF
+}
+
+require_root() {
+    [ "$(id -u)" = 0 ] || die "must run as root (use pkexec or sudo)"
+}
+
+require_tool() {
+    command -v "$1" >/dev/null 2>&1 || die "missing required tool: $1"
+}
+
+latest_release_version() {
+    # Print the latest release's version (without leading 'v').
+    require_tool curl
+    curl -fsSL \
+        --connect-timeout "$CURL_CONNECT_TIMEOUT" \
+        --max-time "$CURL_MAX_TIME" \
+        -H 'Accept: application/vnd.github+json' \
+        -H 'X-GitHub-Api-Version: 2022-11-28' \
+        "https://api.github.com/repos/${REPO}/releases/latest" \
+        | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"v\?\([^"]*\)".*/\1/p' \
+        | head -n1
+}
+
+# ─── Main install path ─────────────────────────────────────────────
+install_release() {
+    local version="$1"
+    local tag="v${version}"
+
+    require_root
+    require_tool curl
+    require_tool tar
+    require_tool make
+    require_tool modprobe
+    require_tool rmmod
+    require_tool timeout
+    [ -x "$SIGSTORE_VERIFY" ] || \
+        die "sigstore-verify not found at $SIGSTORE_VERIFY (reinstall the snakeengine-driver package?)"
+
+    local tmp; tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+
+    local base="https://github.com/${REPO}/releases/download/${tag}"
+    local tarball="snakeengine-driver-${version}.tar.gz"
+
+    log "downloading ${tarball}"
+    curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        -o "$tmp/$tarball" "$base/$tarball"
+    curl -fsSL --connect-timeout "$CURL_CONNECT_TIMEOUT" --max-time "$CURL_MAX_TIME" \
+        -o "$tmp/$tarball.sigstore" "$base/$tarball.sigstore"
+
+    log "verifying signature with sigstore-verify"
+    timeout --kill-after=5s "${SIGSTORE_VERIFY_TIMEOUT}s" \
+        "$SIGSTORE_VERIFY" verify-blob \
+        --bundle "$tmp/$tarball.sigstore" \
+        --certificate-identity-regexp "$IDENTITY_REGEX" \
+        --certificate-oidc-issuer     "$OIDC_ISSUER" \
+        "$tmp/$tarball" \
+        || die "signature verification failed — refusing to install"
+
+    log "extracting"
+    tar xzf "$tmp/$tarball" -C "$tmp"
+    local src="$tmp/snakeengine-driver-${version}"
+    [ -d "$src" ] || die "tarball missing expected top-level dir snakeengine-driver-${version}"
+    local expected_abi
+    expected_abi="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_ABI_VERSION/{print $3}' \
+        "$src/userland/include/snakedrv.h")"
+    [ -n "$expected_abi" ] || die "could not parse SNAKEDRV_ABI_VERSION from release header"
+
+    # Build and load the kernel module BEFORE touching the userland
+    # library: a half-finished update that swaps libsnakedrv but fails to
+    # load the matching module leaves a new-ABI userland talking to the
+    # old kernel module. Module first, userland last.
+
+    # Render dkms.conf with the right version.
+    local dkms_src="/usr/src/snakedrv-${version}"
+    if command -v dkms >/dev/null 2>&1; then
+        remove_dkms_versions
+    fi
+    rm -rf "$dkms_src"
+    cp -a "$src" "$dkms_src"
+    sed "s|@SNAKEDRV_VERSION@|${version}|g" \
+        "$src/packaging/dkms/dkms.conf.in" > "$dkms_src/dkms.conf"
+
+    if command -v dkms >/dev/null 2>&1; then
+        install_via_dkms "$version"
+    else
+        warn "dkms not installed — falling back to direct module install"
+        install_direct "$dkms_src"
+    fi
+
+    install_system_integration "$src"
+
+    log "reloading kernel module"
+    if [ -d /sys/module/snakedrv ]; then
+        rmmod snakedrv \
+            || die "could not unload the currently loaded snakedrv module; close clients and retry"
+    fi
+    if ! modprobe snakedrv; then
+        die "the new module was built but failed to load (Secure Boot / lockdown / kernel mismatch?) — driver not updated"
+    fi
+    verify_loaded_module "$version" "$expected_abi"
+
+    # Module is live — now swap the userland library to match.
+    log "installing userland (libsnakedrv + headers + pkg-config + CMake)"
+    local libdir
+    libdir="$(detect_libdir)"
+    make -C "$src/userland" -j install \
+        PREFIX=/usr LIBDIR="$libdir"
+
+    ldconfig
+
+    log "done. snakeengine-driver ${version} installed and loaded."
+}
+
+remove_dkms_versions() {
+    local status_output
+
+    # Remove every previously-registered snakedrv version so we don't
+    # leave stale /usr/src/snakedrv-* trees behind.
+    if ! status_output="$(dkms status -m snakedrv 2>&1)"; then
+        die "dkms status failed: $status_output"
+    fi
+    while read -r prev; do
+        [ -n "$prev" ] || continue
+        log "removing previous DKMS version: $prev"
+        dkms remove -m snakedrv -v "$prev" --all \
+            || die "dkms remove failed for snakedrv/$prev"
+        rm -rf "/usr/src/snakedrv-$prev"
+    done < <(printf '%s\n' "$status_output" \
+                | sed -n 's|^.*snakedrv[/, ]\([0-9.][0-9.]*\).*|\1|p' \
+                | sort -u)
+}
+
+install_via_dkms() {
+    local version="$1"
+
+    log "DKMS add + autoinstall"
+    dkms add -m snakedrv -v "$version" \
+        || die "dkms add failed for snakedrv/$version"
+    dkms autoinstall -m snakedrv -v "$version" \
+        || die "dkms autoinstall failed — kernel-headers package missing for $(uname -r)?"
+}
+
+install_direct() {
+    local src="$1"
+    require_tool gcc
+    require_tool depmod
+    require_tool modinfo
+    local kdir="/lib/modules/$(uname -r)/build"
+    local ko="$src/kernel/snakedrv.ko"
+    local vermagic
+
+    [ -d "$kdir" ] || die "kernel headers missing at $kdir; install kernel-devel/linux-headers and retry"
+
+    make -C "$src/kernel" CC=gcc -j
+    [ -s "$ko" ] || die "direct build completed but did not produce $ko"
+    modinfo "$ko" >/dev/null \
+        || die "direct build produced an invalid kernel module: $ko"
+    vermagic="$(modinfo -F vermagic "$ko" 2>/dev/null || true)"
+    case "$vermagic" in
+        *"$(uname -r)"*) ;;
+        *) die "built module vermagic '$vermagic' does not match running kernel $(uname -r)" ;;
+    esac
+    install -d "/lib/modules/$(uname -r)/extra"
+    install -m 0644 "$ko" "/lib/modules/$(uname -r)/extra/"
+    depmod -a
+}
+
+install_system_integration() {
+    local src="$1"
+
+    log "installing system integration (udev + modprobe)"
+
+    if ! getent group snakeengine >/dev/null 2>&1; then
+        groupadd --system snakeengine \
+            || die "failed to create snakeengine system group"
+    fi
+
+    install -d /etc/udev/rules.d /etc/modprobe.d
+    install -m 0644 "$src/security/99-snakedrv.rules" /etc/udev/rules.d/99-snakedrv.rules \
+        || die "failed to install udev rule"
+
+    cat > /etc/modprobe.d/snakedrv.conf << 'EOF'
+# SnakeEngine Kernel Driver Configuration
+options snakedrv max_attached_processes=16 event_queue_size=256 debug_level=1
+EOF
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+    fi
+}
+
+verify_loaded_module() {
+    local expected_version="$1"
+    local expected_abi="$2"
+    local loaded_version=''
+    local loaded_abi=''
+    local i
+
+    [ -d /sys/module/snakedrv ] \
+        || die "snakedrv is not loaded after modprobe — driver not updated"
+
+    if [ -r /sys/module/snakedrv/version ]; then
+        loaded_version="$(tr -d '[:space:]' < /sys/module/snakedrv/version)"
+        [ "$loaded_version" = "$expected_version" ] \
+            || die "loaded snakedrv version is $loaded_version, expected $expected_version"
+    else
+        warn "loaded module does not expose /sys/module/snakedrv/version; skipping version check"
+    fi
+
+    [ -r /sys/module/snakedrv/parameters/abi_version ] \
+        || die "loaded snakedrv module does not expose abi_version; refusing to install matching userland"
+    loaded_abi="$(tr -d '[:space:]' < /sys/module/snakedrv/parameters/abi_version)"
+    [ "$loaded_abi" = "$expected_abi" ] \
+        || die "loaded snakedrv ABI is $loaded_abi, expected $expected_abi"
+
+    if command -v udevadm >/dev/null 2>&1; then
+        udevadm control --reload-rules 2>/dev/null || true
+        i=0
+        while [ "$i" -lt 5 ] && [ ! -c /dev/snakedrv ]; do
+            udevadm trigger --subsystem-match=snakedrv --action=add 2>/dev/null || true
+            udevadm settle --timeout=5 2>/dev/null || true
+            i=$((i + 1))
+            sleep 1
+        done
+    fi
+
+    [ -c /dev/snakedrv ] \
+        || die "/dev/snakedrv was not created after loading the verified module; check devtmpfs/udev"
+}
+
+# Best-effort libdir detection. Fedora/RHEL → /usr/lib64, Debian/Ubuntu
+# → /usr/lib/x86_64-linux-gnu, Arch → /usr/lib. Falls back to the
+# pkg-config view of the running system.
+detect_libdir() {
+    if command -v pkg-config >/dev/null 2>&1; then
+        local d
+        d="$(pkg-config --variable=libdir snakedrv 2>/dev/null || true)"
+        [ -n "$d" ] && [ -d "$d" ] && { printf '%s' "$d"; return; }
+    fi
+
+    case "$(uname -m)" in
+        x86_64)
+            if [ -d /usr/lib64 ]; then printf '/usr/lib64'; return; fi
+            if [ -d /usr/lib/x86_64-linux-gnu ]; then printf '/usr/lib/x86_64-linux-gnu'; return; fi
+            ;;
+    esac
+    printf '/usr/lib'
+}
+
+# ─── CLI dispatch ──────────────────────────────────────────────────
+main() {
+    case "${1:-}" in
+        ''|-h|--help)
+            usage
+            exit 0
+            ;;
+        --check)
+            v="$(latest_release_version)" || die "could not query GitHub API"
+            [ -n "$v" ] || die "could not parse latest release tag"
+            printf '%s\n' "$v"
+            ;;
+        v[0-9]*|[0-9]*)
+            install_release "${1#v}"
+            ;;
+        *)
+            die "unknown argument: $1 (try --help)"
+            ;;
+    esac
+}
+
+main "$@"

@@ -10,6 +10,8 @@
 #ifndef _SNAKEDRV_SCANNER_H_
 #define _SNAKEDRV_SCANNER_H_
 
+#include "snakedrv.h"
+
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
@@ -231,15 +233,13 @@ struct snake_scan_options {
  * IOCTL Definitions
  * ============================================================================ */
 
-#ifndef SNAKEDRV_IOCTL_MAGIC
-#define SNAKEDRV_IOCTL_MAGIC 'S'
-#endif
-
-/* Scanner IOCTLs (0x60-0x6F) */
-#define SNAKE_IOCTL_SCAN_EXECUTE        _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x60, struct snake_scan_execute)
-#define SNAKE_IOCTL_SCAN_GET_RESULTS    _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x61, struct snake_scan_execute)
-#define SNAKE_IOCTL_SCAN_FREE_RESULTS   _IOW(SNAKEDRV_IOCTL_MAGIC, 0x62, __u32)
-#define SNAKE_IOCTL_SCAN_GET_INFO       _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x63, struct snake_scan_result_set_info)
+/* Scanner IOCTLs (0x90-0x9F)
+ * Keep this range separate from injection/shadow memory (0x60-0x6F).
+ */
+#define SNAKE_IOCTL_SCAN_EXECUTE        _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x90, struct snake_scan_execute)
+#define SNAKE_IOCTL_SCAN_GET_RESULTS    _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x91, struct snake_scan_execute)
+#define SNAKE_IOCTL_SCAN_FREE_RESULTS   _IOW(SNAKEDRV_IOCTL_MAGIC, 0x92, __u32)
+#define SNAKE_IOCTL_SCAN_GET_INFO       _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x93, struct snake_scan_result_set_info)
 
 /* Backend IOCTLs (0x70-0x7F) */
 #define SNAKE_IOCTL_GET_BACKEND_INFO    _IOR(SNAKEDRV_IOCTL_MAGIC, 0x70, struct snake_backend_info)

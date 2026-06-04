@@ -423,6 +423,7 @@ struct scan_result_set *scanner_create_result_set(uint32_t max_results)
 
 	set->max_results = max_results;
 	set->count = 0;
+	set->scan_type = 0;
 	spin_lock_init(&set->lock);
 
 	/* Initialize cache fields */

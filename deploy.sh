@@ -68,6 +68,7 @@ fi
 BINDIR="${PREFIX}/bin"
 LIBDIR="${PREFIX}/lib"
 INCLUDEDIR="${PREFIX}/include"
+SYSTEM_HELPER_DIR="/usr/lib/snakeengine"
 SYSCONFDIR="/etc"
 MODULEDIR="/lib/modules/$(uname -r)"
 DKMS_SRC="/usr/src/${MODULE_NAME}-${VERSION}"
@@ -137,6 +138,68 @@ check_command() {
     return 0
 }
 
+module_loaded() {
+    [ -d "/sys/module/${MODULE_NAME}" ]
+}
+
+expected_driver_abi() {
+    awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_ABI_VERSION/{print $3}' \
+        "${SCRIPT_DIR}/userland/include/snakedrv.h"
+}
+
+reload_udev_for_driver() {
+    if ! check_command udevadm; then
+        die "udevadm is required to apply /dev/${MODULE_NAME} rules"
+    fi
+
+    udevadm control --reload-rules || die "failed to reload udev rules"
+    udevadm trigger --subsystem-match="${MODULE_NAME}" --action=add 2>/dev/null || true
+    udevadm settle --timeout=5 2>/dev/null || true
+}
+
+verify_loaded_driver() {
+    local expected_abi loaded_abi i
+
+    expected_abi="$(expected_driver_abi)"
+    [ -n "${expected_abi}" ] || die "could not parse expected driver ABI"
+
+    [ -d "/sys/module/${MODULE_NAME}" ] \
+        || die "${MODULE_NAME} module is not loaded"
+
+    [ -r "/sys/module/${MODULE_NAME}/parameters/abi_version" ] \
+        || die "${MODULE_NAME} does not expose abi_version"
+
+    loaded_abi="$(tr -d '[:space:]' < "/sys/module/${MODULE_NAME}/parameters/abi_version")"
+    [ "${loaded_abi}" = "${expected_abi}" ] \
+        || die "${MODULE_NAME} ABI mismatch: loaded=${loaded_abi}, expected=${expected_abi}"
+
+    for i in 1 2 3 4 5; do
+        [ -c "/dev/${MODULE_NAME}" ] && break
+        reload_udev_for_driver
+        sleep 1
+    done
+
+    [ -c "/dev/${MODULE_NAME}" ] \
+        || die "/dev/${MODULE_NAME} was not created; check devtmpfs/udev and /sys/class/${MODULE_NAME}/${MODULE_NAME}/dev"
+
+    log_success "Runtime driver verified: /dev/${MODULE_NAME}, ABI ${loaded_abi}"
+}
+
+load_installed_module() {
+    log_info "Loading installed ${MODULE_NAME} module..."
+
+    if module_loaded; then
+        log_info "Reloading currently loaded ${MODULE_NAME} module..."
+        rmmod "${MODULE_NAME}" \
+            || die "could not unload ${MODULE_NAME}; close SnakeEngine/driver clients and retry"
+    fi
+
+    modprobe "${MODULE_NAME}" \
+        || die "modprobe ${MODULE_NAME} failed; check Secure Boot, module signing, and DKMS logs"
+
+    verify_loaded_driver
+}
+
 # ============================================================================
 # Dependency Management
 # ============================================================================
@@ -169,6 +232,7 @@ install_dependencies_debian() {
         llvm \
         cmake \
         git \
+        golang-go \
         libsdl2-dev \
         libglew-dev \
         libgl-dev
@@ -186,6 +250,7 @@ install_dependencies_fedora() {
         clang \
         llvm \
         cmake \
+        golang \
         elfutils-libelf-devel \
         SDL2-devel \
         glew-devel \
@@ -203,6 +268,7 @@ install_dependencies_arch() {
         clang \
         llvm \
         cmake \
+        go \
         sdl2 \
         glew
 }
@@ -248,6 +314,7 @@ check_dependencies() {
     check_command gcc || missing+=("gcc")
     check_command make || missing+=("make")
     check_command clang || missing+=("clang")
+    check_command go || missing+=("go")
 
     # Check DKMS if needed
     if [ "${USE_DKMS}" -eq 1 ]; then
@@ -360,6 +427,20 @@ build_payload() {
     log_success "ImGui payload built successfully"
 }
 
+build_sigstore_verify() {
+    log_info "Building sigstore verifier..."
+
+    cd "${SCRIPT_DIR}/tools/sigstore-verify" || die "sigstore-verify dir not found"
+    make VERSION="${VERSION}"
+
+    if [ ! -x "sigstore-verify" ]; then
+        die "Failed to build sigstore-verify"
+    fi
+
+    log_success "sigstore verifier built successfully"
+    log_info "Verifier size: $(du -h "sigstore-verify" | cut -f1)"
+}
+
 build_all() {
     log_info "=== Building SnakeEngine Driver v${VERSION} ==="
 
@@ -367,6 +448,7 @@ build_all() {
     build_userland
     build_tests
     build_payload
+    build_sigstore_verify
 
     log_success "=== Build completed successfully ==="
 }
@@ -403,12 +485,14 @@ install_module_direct() {
 install_dkms() {
     log_info "Installing with DKMS..."
 
-    # Remove old version if exists
-    if dkms status | grep -q "${MODULE_NAME}" || true; then
-        if dkms status 2>/dev/null | grep -q "${MODULE_NAME}"; then
-            log_info "Removing old DKMS installation..."
-            dkms remove -m "${MODULE_NAME}" -v "${VERSION}" --all 2>/dev/null || true
-        fi
+    # Remove any existing registration for this exact module/version. DKMS can
+    # leave an "added" tree behind that does not show reliably in `dkms status`,
+    # but still makes `dkms add` fail with "tree already contains".
+    log_info "Removing old DKMS installation if present..."
+    dkms remove -m "${MODULE_NAME}" -v "${VERSION}" --all 2>/dev/null || true
+    if [ -d "/var/lib/dkms/${MODULE_NAME}/${VERSION}" ]; then
+        log_warning "Removing stale DKMS tree: /var/lib/dkms/${MODULE_NAME}/${VERSION}"
+        rm -rf "/var/lib/dkms/${MODULE_NAME:?}/${VERSION:?}"
     fi
 
     # Copy source to DKMS directory
@@ -416,7 +500,12 @@ install_dkms() {
     mkdir -p "${DKMS_SRC}"
     cp -r "${SCRIPT_DIR}/kernel" "${DKMS_SRC}/"
     cp -r "${SCRIPT_DIR}/userland" "${DKMS_SRC}/"
-    cp "${SCRIPT_DIR}/dkms/dkms.conf" "${DKMS_SRC}/"
+
+    # Render dkms.conf with the current VERSION so /usr/src/snakedrv-X
+    # and PACKAGE_VERSION inside it never drift.
+    sed "s|@SNAKEDRV_VERSION@|${VERSION}|g" \
+        "${SCRIPT_DIR}/packaging/dkms/dkms.conf.in" \
+        > "${DKMS_SRC}/dkms.conf"
 
     # Add to DKMS
     dkms add -m "${MODULE_NAME}" -v "${VERSION}"
@@ -433,67 +522,58 @@ install_dkms() {
 install_userland() {
     log_info "Installing userland library..."
 
-    # Create directories
-    mkdir -p "${INCLUDEDIR}/snakeengine"
-    mkdir -p "${BINDIR}"
-    mkdir -p "${LIBDIR}"
+    # Delegate the libsnakedrv install (lib + headers + pkg-config +
+    # CMake config) to the userland Makefile, which is the single source
+    # of truth for install layout. PREFIX/LIBDIR/INCLUDEDIR are passed
+    # through so deploy.sh and bare `make install` produce identical
+    # results.
+    make -C "${SCRIPT_DIR}/userland" install \
+        PREFIX="${PREFIX}" \
+        LIBDIR="${LIBDIR}" \
+        INCLUDEDIR="${INCLUDEDIR}" \
+        || die "userland install failed"
 
-    # Install headers
-    log_info "Installing headers to ${INCLUDEDIR}/snakeengine/"
-    cp "${SCRIPT_DIR}/userland/include/snakedrv.h" "${INCLUDEDIR}/snakeengine/"
-    cp "${SCRIPT_DIR}/userland/include/snakedrv_scanner.h" "${INCLUDEDIR}/snakeengine/" 2>/dev/null || true
-    cp "${SCRIPT_DIR}/userland/include/libsnakedrv.hpp" "${INCLUDEDIR}/snakeengine/"
-    cp "${SCRIPT_DIR}/userland/include/libsnakedrv_scanner.hpp" "${INCLUDEDIR}/snakeengine/" 2>/dev/null || true
-    cp "${SCRIPT_DIR}/userland/include/snakedrv_elf.hpp" "${INCLUDEDIR}/snakeengine/"
+    # Test-suite extras (dlopen injection helpers) are built and shipped
+    # by the tests/ Makefile but installed here for end-user convenience.
+    mkdir -p "${BINDIR}" "${LIBDIR}"
 
-    # Install library (built in userland/ directory)
-    log_info "Installing library to ${LIBDIR}/"
-    if [ -f "${SCRIPT_DIR}/userland/libsnakedrv.so" ]; then
-        cp "${SCRIPT_DIR}/userland/libsnakedrv.so" "${LIBDIR}/"
-        log_info "Installed: libsnakedrv.so ($(du -h "${SCRIPT_DIR}/userland/libsnakedrv.so" | cut -f1))"
-    else
-        log_warning "libsnakedrv.so not found in userland/"
-    fi
-
-    # Install dlopen injection payload library
     if [ -f "${SCRIPT_DIR}/tests/libpayload_dlopen.so" ]; then
-        cp "${SCRIPT_DIR}/tests/libpayload_dlopen.so" "${LIBDIR}/"
+        install -m 0644 "${SCRIPT_DIR}/tests/libpayload_dlopen.so" "${LIBDIR}/"
         log_info "Installed: libpayload_dlopen.so to ${LIBDIR}/"
     else
         log_warning "libpayload_dlopen.so not found in tests/ (build tests first)"
     fi
 
-    # Install dlopen_inject binary
     if [ -f "${SCRIPT_DIR}/tests/dlopen_inject" ]; then
-        cp "${SCRIPT_DIR}/tests/dlopen_inject" "${BINDIR}/"
-        chmod 755 "${BINDIR}/dlopen_inject"
+        install -m 0755 "${SCRIPT_DIR}/tests/dlopen_inject" "${BINDIR}/"
         log_info "Installed: dlopen_inject to ${BINDIR}/"
     else
         log_warning "dlopen_inject not found in tests/ (build tests first)"
     fi
 
-    # Update library cache
+    # Refresh the dynamic loader cache so consumers can dlopen() the
+    # library without LD_LIBRARY_PATH gymnastics.
     ldconfig
 
     log_success "Userland library installed"
-    log_info "Headers available at: ${INCLUDEDIR}/snakeengine/"
-    log_info "Library available at: ${LIBDIR}/libsnakedrv.so"
+    log_info "Headers:     ${INCLUDEDIR}/snakedrv/"
+    log_info "Library:     ${LIBDIR}/libsnakedrv.so"
+    log_info "pkg-config:  ${LIBDIR}/pkgconfig/snakedrv.pc"
+    log_info "CMake:       ${LIBDIR}/cmake/SnakeDrv/SnakeDrvConfig.cmake"
 }
 
 install_udev_rules() {
     log_info "Installing udev rules..."
 
-    cp "${SCRIPT_DIR}/security/99-snakedrv.rules" /etc/udev/rules.d/
-
     # Create group if doesn't exist
     if ! getent group snakeengine > /dev/null; then
-        groupadd snakeengine
-        log_info "Created group 'snakeengine'"
+        groupadd --system snakeengine
+        log_info "Created system group 'snakeengine'"
     fi
 
-    # Reload udev rules
-    udevadm control --reload-rules
-    udevadm trigger
+    install -m 0644 "${SCRIPT_DIR}/security/99-snakedrv.rules" /etc/udev/rules.d/99-snakedrv.rules
+
+    reload_udev_for_driver
 
     log_success "udev rules installed"
 }
@@ -583,6 +663,25 @@ EOF
     log_success "modprobe configuration installed"
 }
 
+install_update_tools() {
+    log_info "Installing update tools..."
+
+    local verifier="${SCRIPT_DIR}/tools/sigstore-verify/sigstore-verify"
+    if [ ! -x "${verifier}" ]; then
+        build_sigstore_verify
+    fi
+
+    install -d "${SYSTEM_HELPER_DIR}"
+    install -m 0755 "${SCRIPT_DIR}/packaging/snakedrv-updater" \
+        "${SYSTEM_HELPER_DIR}/snakedrv-updater"
+    install -m 0755 "${verifier}" \
+        "${SYSTEM_HELPER_DIR}/sigstore-verify"
+
+    log_success "Update tools installed"
+    log_info "Updater:     ${SYSTEM_HELPER_DIR}/snakedrv-updater"
+    log_info "Verifier:    ${SYSTEM_HELPER_DIR}/sigstore-verify"
+}
+
 install_all() {
     check_root
 
@@ -599,16 +698,15 @@ install_all() {
 
     # Install components
     install_kernel_module
-    install_userland
     install_udev_rules
     install_modprobe_config
+    load_installed_module
+    install_userland
+    install_update_tools
     install_selinux
     install_apparmor
 
     log_success "=== Installation completed successfully ==="
-    log_info ""
-    log_info "To load the module now, run:"
-    log_info "  sudo modprobe ${MODULE_NAME}"
     log_info ""
     log_info "To add yourself to the snakeengine group:"
     log_info "  sudo usermod -aG snakeengine \$USER"
@@ -625,11 +723,9 @@ uninstall_all() {
     log_info "=== Uninstalling SnakeEngine Driver ==="
 
     # Unload module if loaded
-    if lsmod | grep -q "^${MODULE_NAME}" || true; then
-        if lsmod 2>/dev/null | grep -q "^${MODULE_NAME}"; then
-            log_info "Unloading module..."
-            rmmod "${MODULE_NAME}" || true
-        fi
+    if module_loaded; then
+        log_info "Unloading module..."
+        rmmod "${MODULE_NAME}" || true
     fi
 
     # Remove DKMS
@@ -649,14 +745,22 @@ uninstall_all() {
     # Remove DKMS source
     rm -rf "${DKMS_SRC}"
 
-    # Remove userland
-    rm -rf "${LIBDIR}/${PROJECT_NAME}"
-    rm -rf "${INCLUDEDIR}/${PROJECT_NAME}"
-    rm -rf "${INCLUDEDIR}/snakeengine"
-    rm -f "${LIBDIR}/libsnakedrv.so"
-    rm -f "${LIBDIR}/libsnakedrv.a"
-    rm -f "${LIBDIR}/libpayload_dlopen.so"
-    rm -f "${BINDIR}/dlopen_inject"
+    # Remove userland (current layout: /usr/include/snakedrv,
+    # /usr/lib/{libsnakedrv.so, pkgconfig/snakedrv.pc, cmake/SnakeDrv}).
+    # Also clean up legacy paths from older releases.
+    rm -rf "${INCLUDEDIR}/snakedrv"
+    rm -rf "${INCLUDEDIR}/snakeengine"        # legacy
+    rm -rf "${LIBDIR}/${PROJECT_NAME}"        # legacy
+    rm -rf "${INCLUDEDIR}/${PROJECT_NAME}"    # legacy
+    rm -rf "${LIBDIR}/cmake/SnakeDrv"
+    rm -f  "${LIBDIR}/pkgconfig/snakedrv.pc"
+    rm -f  "${LIBDIR}/libsnakedrv.so"
+    rm -f  "${LIBDIR}/libsnakedrv.a"
+    rm -f  "${LIBDIR}/libpayload_dlopen.so"
+    rm -f  "${BINDIR}/dlopen_inject"
+    rm -f  "${SYSTEM_HELPER_DIR}/snakedrv-updater"
+    rm -f  "${SYSTEM_HELPER_DIR}/sigstore-verify"
+    rmdir "${SYSTEM_HELPER_DIR}" 2>/dev/null || true
 
     # Remove configs
     rm -f /etc/modprobe.d/snakedrv.conf
@@ -684,11 +788,10 @@ uninstall_all() {
 load_module() {
     check_root
 
-    if lsmod | grep -q "^${MODULE_NAME}" || true; then
-        if lsmod 2>/dev/null | grep -q "^${MODULE_NAME}"; then
-            log_info "Module already loaded"
-            return
-        fi
+    if module_loaded; then
+        log_info "Module already loaded"
+        verify_loaded_driver
+        return
     fi
 
     log_info "Loading module..."
@@ -699,20 +802,13 @@ load_module() {
         modprobe "${MODULE_NAME}"
     fi
 
-    # Wait for device
-    sleep 1
-
-    if [ -e "/dev/${MODULE_NAME}" ]; then
-        log_success "Module loaded, device: /dev/${MODULE_NAME}"
-    else
-        log_warning "Module loaded but device not created"
-    fi
+    verify_loaded_driver
 }
 
 unload_module() {
     check_root
 
-    if ! lsmod | grep -q "^${MODULE_NAME}"; then
+    if ! module_loaded; then
         log_info "Module not loaded"
         return
     fi
@@ -736,7 +832,7 @@ run_tests() {
     fi
 
     # Check that module is loaded
-    if ! lsmod | grep -q "^${MODULE_NAME}" 2>/dev/null; then
+    if ! module_loaded; then
         log_warning "Kernel module is not loaded. Load it first: sudo ./deploy.sh load"
     fi
 
@@ -806,10 +902,19 @@ show_status() {
 
     # Module status
     echo "Kernel Module:"
-    if lsmod | grep -q "^${MODULE_NAME}" 2>/dev/null; then
+    if module_loaded; then
         echo "  Status: LOADED"
+        if [ -r "/sys/module/${MODULE_NAME}/parameters/abi_version" ]; then
+            echo "  ABI:    $(cat "/sys/module/${MODULE_NAME}/parameters/abi_version")"
+        fi
         echo "  Info:"
-        lsmod | grep "^${MODULE_NAME}" | awk '{print "    Size: "$2" bytes, Used by: "$3}' || true
+        if lsmod 2>/dev/null | grep -q "^${MODULE_NAME}"; then
+            lsmod | grep "^${MODULE_NAME}" | awk '{print "    Size: "$2" bytes, Used by: "$3}' || true
+        elif [ -r "/sys/module/${MODULE_NAME}/initstate" ]; then
+            echo "    Init state: $(cat "/sys/module/${MODULE_NAME}/initstate")"
+        else
+            echo "    Present in /sys/module/${MODULE_NAME}"
+        fi
     else
         echo "  Status: NOT LOADED"
     fi
@@ -829,9 +934,9 @@ show_status() {
     echo "Shadow Memory:"
     if [ -f "/sys/module/${MODULE_NAME}/parameters/shadow_alloc_count" ]; then
         echo "  Allocations: $(cat "/sys/module/${MODULE_NAME}/parameters/shadow_alloc_count")"
-    elif [ -e "/dev/${MODULE_NAME}" ]; then
+    elif module_loaded; then
         local SHADOW_COUNT
-        SHADOW_COUNT=$(dmesg | grep -c "snakedrv.*shadow" 2>/dev/null || true)
+        SHADOW_COUNT=$(dmesg 2>/dev/null | grep -c "snakedrv.*shadow" || true)
         echo "  Recent shadow operations in dmesg: ${SHADOW_COUNT:-0}"
     else
         echo "  N/A (module not loaded)"
@@ -842,9 +947,9 @@ show_status() {
     echo "Attached Processes:"
     if [ -f "/sys/module/${MODULE_NAME}/parameters/attached_count" ]; then
         echo "  Count: $(cat "/sys/module/${MODULE_NAME}/parameters/attached_count")"
-    elif [ -e "/dev/${MODULE_NAME}" ]; then
+    elif module_loaded; then
         local ATTACH_COUNT
-        ATTACH_COUNT=$(dmesg | grep -c "snakedrv.*attach" 2>/dev/null || true)
+        ATTACH_COUNT=$(dmesg 2>/dev/null | grep -c "snakedrv.*attach" || true)
         echo "  Recent attach operations in dmesg: ${ATTACH_COUNT:-0}"
     else
         echo "  N/A (module not loaded)"
@@ -880,9 +985,23 @@ show_status() {
     fi
     echo ""
 
+    # Updater status
+    echo "Update Tools:"
+    if [ -x "${SYSTEM_HELPER_DIR}/snakedrv-updater" ] && \
+       [ -x "${SYSTEM_HELPER_DIR}/sigstore-verify" ]; then
+        echo "  Status: INSTALLED"
+        echo "  Updater:  ${SYSTEM_HELPER_DIR}/snakedrv-updater"
+        echo "  Verifier: ${SYSTEM_HELPER_DIR}/sigstore-verify"
+    else
+        echo "  Status: NOT INSTALLED (run: sudo ./deploy.sh install)"
+        [ -x "${SYSTEM_HELPER_DIR}/snakedrv-updater" ] || echo "  Missing: ${SYSTEM_HELPER_DIR}/snakedrv-updater"
+        [ -x "${SYSTEM_HELPER_DIR}/sigstore-verify" ] || echo "  Missing: ${SYSTEM_HELPER_DIR}/sigstore-verify"
+    fi
+    echo ""
+
     # Kernel log
     echo "Recent kernel messages:"
-    dmesg | grep -i snakedrv | tail -10 || echo "  No messages found" || true
+    dmesg 2>/dev/null | grep -i snakedrv | tail -10 || echo "  No messages found" || true
 }
 
 # ============================================================================

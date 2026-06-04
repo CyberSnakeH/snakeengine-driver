@@ -851,12 +851,8 @@ public:
     std::optional<ExtendedProcessInfo> getProcessInfo(ProcessId pid);
     /**
      * getKernelThreads - Query thread list from the driver
-     *
-     * Note: This is currently a stub and returns an empty list until
-     * the kernel-side implementation is added.
-     *
      * @pid: Target PID
-     * @return Vector of KernelThreadInfo (currently empty)
+     * @return Vector of KernelThreadInfo
      */
     std::vector<KernelThreadInfo> getKernelThreads(ProcessId pid);
 

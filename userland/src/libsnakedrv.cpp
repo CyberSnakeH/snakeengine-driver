@@ -20,6 +20,8 @@
 #include <mutex>
 #include <algorithm>
 
+extern "C" int snake_inject_library(int fd, int pid, const char* path);
+
 namespace snake {
 
 /* ============================================================================
@@ -861,16 +863,36 @@ Driver::InjectionResult Driver::injectThread(ProcessId pid, Address entryPoint, 
 }
 
 /**
- * Driver::manualMapLibrary - Manual map an ELF shared object (stub)
- *
- * This is not yet implemented in the userland wrapper.
+ * Driver::manualMapLibrary - Manual map an ELF shared object
  */
 Driver::InjectionResult Driver::manualMapLibrary(ProcessId pid, const std::string& libraryPath) {
     InjectionResult result{false, 0, 0, ""};
 
-    // TODO: Implement full manual mapping
-    // For now, return a placeholder error
-    result.errorMsg = "Manual mapping not yet implemented. Use Allocate + Write + Protect workflow.";
+    if (!isOpen()) {
+        result.errorMsg = "Driver not open";
+        return result;
+    }
+
+    if (libraryPath.empty()) {
+        result.errorMsg = "Library path is empty";
+        return result;
+    }
+
+    bool wasAttached = isAttached() && attachedPid() == pid;
+    if (!wasAttached && !attach(pid)) {
+        result.errorMsg = "Failed to attach for manual mapping";
+        return result;
+    }
+
+    if (snake_inject_library(impl_->fd, pid, libraryPath.c_str()) != 0) {
+        result.errorCode = errno;
+        result.errorMsg = "Manual mapping failed";
+        if (!wasAttached) detach();
+        return result;
+    }
+
+    if (!wasAttached) detach();
+    result.success = true;
     return result;
 }
 
@@ -989,12 +1011,46 @@ std::optional<Driver::ExtendedProcessInfo> Driver::getProcessInfo(ProcessId pid)
 }
 
 /**
- * Driver::getKernelThreads - Return kernel thread list (not implemented)
- *
- * TODO: Implement thread enumeration via kernel IOCTL.
+ * Driver::getKernelThreads - Return thread list for a process
  */
 std::vector<Driver::KernelThreadInfo> Driver::getKernelThreads(ProcessId pid) {
-    return {};
+    std::vector<KernelThreadInfo> result;
+    std::string taskDir = "/proc/" + std::to_string(pid) + "/task";
+    DIR* dir = opendir(taskDir.c_str());
+    if (!dir) return result;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        char* endptr = nullptr;
+        long tid = strtol(entry->d_name, &endptr, 10);
+        if (*endptr != '\0' || tid <= 0) continue;
+
+        KernelThreadInfo info{};
+        info.tid = static_cast<ThreadId>(tid);
+        info.kernelStack = 0;
+
+        std::string commPath = taskDir + "/" + entry->d_name + "/comm";
+        std::ifstream commFile(commPath);
+        if (commFile.is_open()) {
+            std::getline(commFile, info.name);
+        }
+
+        std::string statPath = taskDir + "/" + entry->d_name + "/stat";
+        std::ifstream statFile(statPath);
+        std::string statLine;
+        if (std::getline(statFile, statLine)) {
+            auto closeParen = statLine.rfind(')');
+            if (closeParen != std::string::npos &&
+                closeParen + 2 < statLine.size()) {
+                info.state = static_cast<uint64_t>(statLine[closeParen + 2]);
+            }
+        }
+
+        result.push_back(std::move(info));
+    }
+
+    closedir(dir);
+    return result;
 }
 
 /* ============================================================================

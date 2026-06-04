@@ -55,7 +55,7 @@ sudo dlopen_inject <pid> /path/to/payload.so
 sudo ./deploy.sh inject <pid> /path/to/payload.so
 ```
 
-The payload must export a `ManualMapEntry(void*)` function. After injection, the `.so` VMAs are automatically hidden from `/proc/pid/maps`.
+The payload must export a `ManualMapEntry(void*)` function. Manual-map stealth is intentionally disabled for now: hiding the VMA before the payload has faulted all pages can crash the target on later page faults.
 
 ### ImGui overlay example
 
@@ -264,7 +264,7 @@ sign-module.sh   Secure Boot module signing (MOK)
 - `sign-module.sh`: cross-distro `sign-file` detection (Fedora + Debian/Ubuntu)
 
 ### 1.2 (2026-01-15)
-- Stealth manual map injector pipeline (alloc, relocate, write, VMA unlinking)
+- Manual map injector pipeline (alloc, relocate, write); VMA stealth remains disabled until deferred page-fault-safe hiding is implemented
 - Improved remote symbol resolution and IFUNC handling for glibc
 - GitHub Actions CI build and release workflows
 - Documentation and wiki refresh

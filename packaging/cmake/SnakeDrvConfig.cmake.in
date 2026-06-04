@@ -1,0 +1,87 @@
+#
+# SnakeDrvConfig.cmake — exported by libsnakedrv.
+#
+# This file is rendered from SnakeDrvConfig.cmake.in by the Makefile
+# (sed substitutes the @VARS@ placeholders), so it cannot rely on the
+# CMake-only @PACKAGE_INIT@ macro.
+#
+# Usage in a downstream project:
+#
+#   find_package(SnakeDrv 2.0 REQUIRED)
+#   target_link_libraries(myapp PRIVATE SnakeDrv::SnakeDrv)
+#
+# Headers under <snakedrv/...> become reachable and the runtime library
+# is linked. Header-only consumers can use SnakeDrv::Headers.
+#
+
+cmake_minimum_required(VERSION 3.16)
+
+macro(_snakedrv_set_and_check _var _file)
+    set(${_var} "${_file}")
+    if(NOT EXISTS "${_file}")
+        message(FATAL_ERROR
+            "SnakeDrv: ${_var} = ${_file} does not exist. "
+            "Reinstall libsnakedrv or pass -DCMAKE_PREFIX_PATH=<path>.")
+    endif()
+endmacro()
+
+macro(_snakedrv_check_required_components _NAME)
+    foreach(comp ${${_NAME}_FIND_COMPONENTS})
+        if(NOT ${_NAME}_${comp}_FOUND)
+            if(${_NAME}_FIND_REQUIRED_${comp})
+                set(${_NAME}_FOUND FALSE)
+            endif()
+        endif()
+    endforeach()
+endmacro()
+
+function(_snakedrv_read_header_define _out_var _header _define)
+    file(STRINGS "${_header}" _matches
+         REGEX "^[ \t]*#[ \t]*define[ \t]+${_define}[ \t]+[0-9]+")
+    if(NOT _matches)
+        message(FATAL_ERROR
+            "SnakeDrv: ${_header} does not define ${_define}. "
+            "Reinstall libsnakedrv headers.")
+    endif()
+    list(GET _matches 0 _line)
+    string(REGEX REPLACE
+           "^[ \t]*#[ \t]*define[ \t]+${_define}[ \t]+([0-9]+).*$"
+           "\\1" _value "${_line}")
+    set(${_out_var} "${_value}" PARENT_SCOPE)
+endfunction()
+
+set(SNAKEDRV_VERSION         "@SNAKEDRV_VERSION@")
+set(SNAKEDRV_VERSION_MAJOR   @SNAKEDRV_VERSION_MAJOR@)
+set(SNAKEDRV_VERSION_MINOR   @SNAKEDRV_VERSION_MINOR@)
+set(SNAKEDRV_VERSION_PATCH   @SNAKEDRV_VERSION_PATCH@)
+set(SNAKEDRV_ABI_VERSION     @SNAKEDRV_ABI_VERSION@)
+
+_snakedrv_set_and_check(SNAKEDRV_INCLUDE_DIR "@INCLUDEDIR@")
+_snakedrv_set_and_check(SNAKEDRV_LIBRARY     "@LIBDIR@/libsnakedrv.so")
+_snakedrv_set_and_check(SNAKEDRV_MAIN_HEADER "${SNAKEDRV_INCLUDE_DIR}/snakedrv.h")
+_snakedrv_set_and_check(SNAKEDRV_SCANNER_HEADER "${SNAKEDRV_INCLUDE_DIR}/snakedrv_scanner.h")
+
+_snakedrv_read_header_define(_SNAKEDRV_HEADER_ABI
+    "${SNAKEDRV_MAIN_HEADER}" "SNAKEDRV_ABI_VERSION")
+if(NOT _SNAKEDRV_HEADER_ABI EQUAL SNAKEDRV_ABI_VERSION)
+    message(FATAL_ERROR
+        "SnakeDrv: package ABI (${SNAKEDRV_ABI_VERSION}) does not match "
+        "installed header ABI (${_SNAKEDRV_HEADER_ABI}). Reinstall libsnakedrv.")
+endif()
+
+if(NOT TARGET SnakeDrv::Headers)
+    add_library(SnakeDrv::Headers INTERFACE IMPORTED)
+    set_target_properties(SnakeDrv::Headers PROPERTIES
+        INTERFACE_INCLUDE_DIRECTORIES "${SNAKEDRV_INCLUDE_DIR}"
+    )
+endif()
+
+if(NOT TARGET SnakeDrv::SnakeDrv)
+    add_library(SnakeDrv::SnakeDrv SHARED IMPORTED)
+    set_target_properties(SnakeDrv::SnakeDrv PROPERTIES
+        IMPORTED_LOCATION             "${SNAKEDRV_LIBRARY}"
+        INTERFACE_INCLUDE_DIRECTORIES "${SNAKEDRV_INCLUDE_DIR}"
+    )
+endif()
+
+_snakedrv_check_required_components(SnakeDrv)
