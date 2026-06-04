@@ -466,6 +466,29 @@ int injector_protect(struct snake_inject_protect *protect_info)
     return ctx.ret;
 }
 
+static int injector_resume_task(struct task_struct *task)
+{
+    int wait_count;
+    int ret;
+
+    wake_up_process(task);
+    ret = send_sig(SIGCONT, task, 1);
+    if (ret < 0) {
+        pr_err("snakedrv: Failed to send SIGCONT: %d\n", ret);
+        return ret;
+    }
+
+    for (wait_count = 0; wait_count < 200; wait_count++) {
+        if (!task_is_stopped(task) && !task_is_traced(task))
+            return 0;
+        msleep(5);
+    }
+
+    pr_err("snakedrv: Task remained stopped after SIGCONT, state=0x%x\n",
+           READ_ONCE(task->__state));
+    return -EAGAIN;
+}
+
 /*
  * Hijack an existing thread to run our payload.
  *
@@ -518,7 +541,7 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
             READ_ONCE(task->__state), wait_count * 5);
     if (!stopped) {
         pr_err("snakedrv: Task did not stop in time\n");
-        send_sig(SIGCONT, task, 1);
+        injector_resume_task(task);
         put_task_struct(task);
         return -EAGAIN;
     }
@@ -527,7 +550,7 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
     regs = task_pt_regs(task);
     if (!regs) {
         pr_err("snakedrv: Cannot get pt_regs\n");
-        send_sig(SIGCONT, task, 1);
+        injector_resume_task(task);
         put_task_struct(task);
         return -EINVAL;
     }
@@ -572,7 +595,7 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
                                         1);
         if (written != sizeof(original_rip)) {
             pr_err("snakedrv: Failed to write return address (%d)\n", written);
-            send_sig(SIGCONT, task, 1);
+            injector_resume_task(task);
             put_task_struct(task);
             return -EFAULT;
         }
@@ -598,9 +621,12 @@ int injector_create_thread(struct snake_inject_thread *thread_info)
     /* Memory barrier */
     smp_wmb();
 
-    /* Step 4: Resume the task */
-    wake_up_process(task);
-    send_sig(SIGCONT, task, 1);
+    /* Step 4: Resume the task and fail if it remains stopped. */
+    ret = injector_resume_task(task);
+    if (ret < 0) {
+        put_task_struct(task);
+        return ret;
+    }
 
     pr_info("snakedrv: Task resumed, state: 0x%x\n", READ_ONCE(task->__state));
 
@@ -668,6 +694,58 @@ static int shadow_mmap_worker(void *data)
 	kthread_unuse_mm(ctx->mm);
 	complete(&ctx->done);
 	return 0;
+}
+
+struct shadow_unmap_ctx {
+	struct mm_struct *mm;
+	unsigned long addr;
+	unsigned long size;
+	struct completion done;
+	int ret;
+};
+
+static int shadow_unmap_worker(void *data)
+{
+	struct shadow_unmap_ctx *ctx = data;
+
+	kthread_use_mm(ctx->mm);
+	ctx->ret = vm_munmap(ctx->addr, ctx->size);
+	kthread_unuse_mm(ctx->mm);
+
+	complete(&ctx->done);
+	return 0;
+}
+
+static void shadow_unmap_allocation(struct mm_struct *mm,
+				    unsigned long addr,
+				    unsigned long size)
+{
+	struct shadow_unmap_ctx ctx;
+	struct task_struct *worker;
+
+	if (!addr || !size)
+		return;
+
+	ctx.mm = mm;
+	ctx.addr = addr;
+	ctx.size = size;
+	init_completion(&ctx.done);
+
+	worker = kthread_run(shadow_unmap_worker, &ctx, "snake_sh_unmap");
+	if (IS_ERR(worker)) {
+		pr_warn("snakedrv: shadow unmap worker failed: %ld\n",
+			PTR_ERR(worker));
+		return;
+	}
+
+	if (!wait_for_completion_timeout(&ctx.done,
+			msecs_to_jiffies(INJECTOR_WORKER_TIMEOUT_MS))) {
+		pr_warn("snakedrv: shadow unmap timed out\n");
+		return;
+	}
+
+	if (ctx.ret)
+		pr_warn("snakedrv: shadow unmap failed: %d\n", ctx.ret);
 }
 
 static struct shadow_alloc_entry *
@@ -845,7 +923,7 @@ int injector_shadow_alloc(struct snake_shadow_alloc *info)
 	/* Tracking structure */
 	sa = kzalloc(sizeof(*sa), GFP_KERNEL);
 	if (!sa) {
-		/* TODO: vm_munmap the allocation */
+		shadow_unmap_allocation(mm, ctx.addr_out, size);
 		mmput(mm);
 		return -ENOMEM;
 	}
@@ -853,6 +931,7 @@ int injector_shadow_alloc(struct snake_shadow_alloc *info)
 	sa->pages = kvmalloc_array(nr_pages, sizeof(struct page *),
 				   GFP_KERNEL | __GFP_ZERO);
 	if (!sa->pages) {
+		shadow_unmap_allocation(mm, ctx.addr_out, size);
 		kfree(sa);
 		mmput(mm);
 		return -ENOMEM;
@@ -875,6 +954,7 @@ int injector_shadow_alloc(struct snake_shadow_alloc *info)
 		       pinned, nr_pages);
 		for (i = 0; i < (pinned > 0 ? pinned : 0); i++)
 			put_page(sa->pages[i]);
+		shadow_unmap_allocation(mm, ctx.addr_out, size);
 		kvfree(sa->pages);
 		kfree(sa);
 		mmput(mm);

@@ -59,6 +59,7 @@ struct bloom_filter;
  * @lock: Spinlock for thread-safe access
  * @bloom: Optional Bloom filter for fast address lookups (rescans)
  * @use_bloom: If true, use Bloom filter for membership testing
+ * @scan_type: Type of scan that created the result set
  * @id: Unique ID for this result set (0 = not cached)
  * @ref_count: Reference count for cache management
  * @list: List node for cached result sets
@@ -75,6 +76,7 @@ struct scan_result_set {
 	spinlock_t lock;
 	struct bloom_filter *bloom;
 	bool use_bloom;
+	uint32_t scan_type;
 	uint32_t id;
 	atomic_t ref_count;
 	struct list_head list;

@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE policyconfig PUBLIC
+ "-//freedesktop//DTD PolicyKit Policy Configuration 1.0//EN"
+ "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
+<!--
+  PolicyKit policy for snakeengine-driver.
+
+  Lets the SnakeEngine UI invoke the updater via pkexec without
+  requiring the user to type 'sudo' in a terminal — they get the
+  standard graphical authentication dialog instead.
+-->
+<policyconfig>
+
+  <vendor>SnakeEngine</vendor>
+  <vendor_url>https://github.com/CyberSnakeH/snakeengine-driver</vendor_url>
+
+  <action id="com.snakeengine.driver.update">
+    <description>Update the SnakeEngine kernel driver</description>
+    <description xml:lang="fr">Mettre à jour le pilote noyau SnakeEngine</description>
+    <message>Authentication is required to install or update the SnakeEngine kernel driver.</message>
+    <message xml:lang="fr">Une authentification est requise pour installer ou mettre à jour le pilote noyau SnakeEngine.</message>
+
+    <defaults>
+      <!-- Local console users may auth with their own password.
+           Remote (SSH) users must provide an admin password. -->
+      <allow_any>auth_admin</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin_keep</allow_active>
+    </defaults>
+
+    <!-- Bind this action to /usr/lib/snakeengine/snakedrv-updater
+         so any other binary trying to use the same action id won't
+         match. -->
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/lib/snakeengine/snakedrv-updater</annotate>
+    <annotate key="org.freedesktop.policykit.exec.allow_gui">true</annotate>
+  </action>
+
+</policyconfig>

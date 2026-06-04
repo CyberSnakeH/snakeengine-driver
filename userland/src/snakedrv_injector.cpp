@@ -15,6 +15,7 @@
 #include <sstream>
 #include <map>
 #include <algorithm>
+#include <limits>
 #include <sys/ioctl.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -29,6 +30,45 @@
 #define LOG_DBG(fmt, ...) // fprintf(stderr, "[DEBUG] " fmt "\n", ##__VA_ARGS__)
 
 namespace snakedrv {
+
+static bool checked_add_u64(uint64_t a, uint64_t b, uint64_t& out) {
+    if (b > std::numeric_limits<uint64_t>::max() - a) return false;
+    out = a + b;
+    return true;
+}
+
+static bool range_fits(size_t container_size, uint64_t offset, uint64_t size) {
+    uint64_t end;
+    return checked_add_u64(offset, size, end) && end <= container_size;
+}
+
+static uint64_t image_base_vaddr(const ElfImage& image) {
+    uint64_t base = std::numeric_limits<uint64_t>::max();
+    for (const auto& seg : image.segments) {
+        if (seg.virtual_address < base) base = seg.virtual_address;
+    }
+    return base == std::numeric_limits<uint64_t>::max() ? 0 : base;
+}
+
+static uint8_t* image_vaddr_ptr(ElfImage& image, uint64_t vaddr, size_t size) {
+    uint64_t base = image_base_vaddr(image);
+    uint64_t end;
+    if (!checked_add_u64(vaddr, size, end)) return nullptr;
+
+    for (const auto& seg : image.segments) {
+        uint64_t seg_end;
+        if (!checked_add_u64(seg.virtual_address, seg.memory_size, seg_end))
+            continue;
+        if (vaddr < seg.virtual_address || end > seg_end)
+            continue;
+
+        uint64_t offset = vaddr - base;
+        if (!range_fits(image.raw_image.size(), offset, size))
+            return nullptr;
+        return image.raw_image.data() + offset;
+    }
+    return nullptr;
+}
 
 /*
  * Remote Process Reader Implementation
@@ -46,7 +86,7 @@ public:
      */
     DriverRemoteReader(int fd, pid_t pid) : driver_fd(fd), target_pid(pid) {
         // Must attach to process to perform read operations
-        struct snake_debug_attach attach = {0};
+        struct snake_debug_attach attach{};
         attach.pid = pid;
         attach.flags = 0; // No suspend needed
         attach.result = 0;
@@ -77,7 +117,7 @@ public:
         while (remaining > 0) {
             size_t chunk = (remaining > MAX_CHUNK) ? MAX_CHUNK : remaining;
             
-            struct snake_memory_op op = {0};
+            struct snake_memory_op op{};
             op.pid = target_pid;
             op.address = current_addr;
             op.size = chunk;
@@ -294,7 +334,7 @@ private:
         std::vector<Elf64_Dyn> dyns(dyn_size / sizeof(Elf64_Dyn));
         if (!read(dyn_addr, dyns.data(), dyn_size)) return;
 
-        uint64_t strtab = 0, symtab = 0, syment = 0;
+        uint64_t strtab = 0, symtab = 0, hash = 0;
         size_t strsz = 0;
 
         for (const auto& d : dyns) {
@@ -302,38 +342,47 @@ private:
                 case DT_STRTAB: strtab = d.d_un.d_ptr; break;
                 case DT_SYMTAB: symtab = d.d_un.d_ptr; break;
                 case DT_STRSZ:  strsz = d.d_un.d_val; break;
-                case DT_SYMENT: syment = d.d_un.d_val; break;
+                case DT_HASH:   hash = d.d_un.d_ptr; break;
             }
         }
 
-        if (!strtab || !symtab) return;
+        if (!strtab || !symtab || !strsz) return;
         
         // Adjust pointers if they are offsets (common in PIE/PIC)
         if (strtab < base) strtab += base;
         if (symtab < base) symtab += base;
-
-        // 4. Bulk Read Symbol Table and String Table
-        // This is the Optimization Key: Read huge chunks instead of ping-ponging
-        
-        if (strtab < base) strtab += base;
-        if (symtab < base) symtab += base;
+        if (hash && hash < base) hash += base;
 
         // Dynamic Size Calculation
         size_t sym_data_size = 0;
         size_t str_data_size = strsz;
+        size_t num_syms = 0;
 
-        if (strtab > symtab) {
+        if (hash) {
+            uint32_t hash_header[2] = {};
+            if (read(hash, hash_header, sizeof(hash_header))) {
+                num_syms = hash_header[1];
+                sym_data_size = num_syms * sizeof(Elf64_Sym);
+            }
+        }
+
+        if (sym_data_size == 0 && strtab > symtab) {
             // Common case: symtab is immediately followed by strtab
             sym_data_size = strtab - symtab;
-        } else {
+            num_syms = sym_data_size / sizeof(Elf64_Sym);
+        }
+
+        if (sym_data_size == 0) {
             // Fallback if layout is weird (e.g. strtab before symtab)
             // Read a reasonable amount, but try not to over-read.
             sym_data_size = 512 * 1024; // 512KB safe bet?
+            num_syms = sym_data_size / sizeof(Elf64_Sym);
         }
         
         // Safety cap for fallback
         if (str_data_size > 32 * 1024 * 1024) str_data_size = 32 * 1024 * 1024; // Cap at 32MB
         if (sym_data_size > 32 * 1024 * 1024) sym_data_size = 32 * 1024 * 1024;
+        num_syms = std::min(num_syms, sym_data_size / sizeof(Elf64_Sym));
 
         std::vector<uint8_t> sym_data(sym_data_size);
         std::vector<uint8_t> str_data(str_data_size);
@@ -356,16 +405,17 @@ private:
         }
 
         // 5. Parse Symbols locally
-        size_t num_syms = sym_data_size / sizeof(Elf64_Sym);
         Elf64_Sym* syms = (Elf64_Sym*)sym_data.data();
         
         LOG_INFO("DEBUG: Parsing %zu symbols...", num_syms);
 
         auto& cache = export_cache[base];
-        int debug_count = 0;
         
         for (size_t i = 0; i < num_syms; i++) {
             if (syms[i].st_name >= str_data_size) continue; // Out of read bounds
+            if (memchr(str_data.data() + syms[i].st_name, '\0',
+                       str_data_size - syms[i].st_name) == nullptr)
+                continue;
             
             // Only care about defined global/weak functions
             unsigned char type = ELF64_ST_TYPE(syms[i].st_info);
@@ -416,6 +466,8 @@ bool ElfParser::load_file() {
     if (!file.is_open()) return false;
     
     std::streamsize size = file.tellg();
+    if (size < static_cast<std::streamsize>(sizeof(Elf64_Ehdr)))
+        return false;
     file.seekg(0, std::ios::beg);
     
     file_data.resize(size);
@@ -423,7 +475,19 @@ bool ElfParser::load_file() {
     
     ehdr = (Elf64_Ehdr*)file_data.data();
     if (memcmp(ehdr->e_ident, ELFMAG, SELFMAG) != 0) return false;
+    if (ehdr->e_ident[EI_CLASS] != ELFCLASS64) return false;
+    if (ehdr->e_ident[EI_DATA] != ELFDATA2LSB) return false;
     if (ehdr->e_machine != EM_X86_64) return false;
+    if (ehdr->e_phentsize != sizeof(Elf64_Phdr)) return false;
+    if (!range_fits(file_data.size(), ehdr->e_phoff,
+                    static_cast<uint64_t>(ehdr->e_phnum) * sizeof(Elf64_Phdr)))
+        return false;
+    if (ehdr->e_shnum > 0) {
+        if (ehdr->e_shentsize != sizeof(Elf64_Shdr)) return false;
+        if (!range_fits(file_data.size(), ehdr->e_shoff,
+                        static_cast<uint64_t>(ehdr->e_shnum) * sizeof(Elf64_Shdr)))
+            return false;
+    }
     
     phdr = (Elf64_Phdr*)(file_data.data() + ehdr->e_phoff);
     return true;
@@ -440,13 +504,23 @@ bool ElfParser::parse() {
     
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == PT_LOAD) {
+            uint64_t seg_end;
+            if (phdr[i].p_filesz > phdr[i].p_memsz)
+                return false;
+            if (!checked_add_u64(phdr[i].p_vaddr, phdr[i].p_memsz, seg_end))
+                return false;
+            if (!range_fits(file_data.size(), phdr[i].p_offset, phdr[i].p_filesz))
+                return false;
             if (phdr[i].p_vaddr < min_vaddr) min_vaddr = phdr[i].p_vaddr;
-            if (phdr[i].p_vaddr + phdr[i].p_memsz > max_vaddr) 
-                max_vaddr = phdr[i].p_vaddr + phdr[i].p_memsz;
+            if (seg_end > max_vaddr) max_vaddr = seg_end;
         }
     }
+    if (min_vaddr == UINT64_MAX || max_vaddr <= min_vaddr)
+        return false;
     
     image.total_size = max_vaddr - min_vaddr;
+    if (image.total_size > 512ULL * 1024ULL * 1024ULL)
+        return false;
     image.base_address = 0; 
     image.entry_point = ehdr->e_entry;
     image.raw_image.resize(image.total_size, 0);
@@ -461,7 +535,10 @@ bool ElfParser::parse() {
             seg.flags = phdr[i].p_flags;
             
             if (seg.file_size > 0) {
-                memcpy(image.raw_image.data() + (seg.virtual_address - min_vaddr),
+                uint64_t image_offset = seg.virtual_address - min_vaddr;
+                if (!range_fits(image.raw_image.size(), image_offset, seg.file_size))
+                    return false;
+                memcpy(image.raw_image.data() + image_offset,
                        file_data.data() + seg.file_offset,
                        seg.file_size);
             }
@@ -477,23 +554,18 @@ bool ElfParser::parse() {
  * ElfParser::collect_imports - Collect external relocations
  */
 void ElfParser::collect_imports() {
-    // Helper to find segment pointer
-    auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
-        for(const auto& seg : image.segments) {
-            if(vaddr >= seg.virtual_address && vaddr < seg.virtual_address + seg.file_size) {
-                return image.raw_image.data() + (vaddr - image.segments[0].virtual_address);
-            }
-        }
-        return nullptr;
-    };
-
     Elf64_Dyn* dyn = nullptr;
-    uint64_t dyn_size = 0;
+    size_t dyn_count = 0;
     
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == PT_DYNAMIC) {
+            if (phdr[i].p_filesz % sizeof(Elf64_Dyn) != 0 ||
+                !range_fits(file_data.size(), phdr[i].p_offset, phdr[i].p_filesz)) {
+                LOG_ERR("Invalid PT_DYNAMIC bounds");
+                return;
+            }
             dyn = (Elf64_Dyn*)(file_data.data() + phdr[i].p_offset);
-            dyn_size = phdr[i].p_filesz / sizeof(Elf64_Dyn);
+            dyn_count = phdr[i].p_filesz / sizeof(Elf64_Dyn);
             break;
         }
     }
@@ -506,8 +578,10 @@ void ElfParser::collect_imports() {
     uint64_t jmprel_sz = 0;
     uint64_t symtab_offset = 0;
     uint64_t strtab_offset = 0;
+    uint64_t strtab_size = 0;
+    uint64_t hash_offset = 0;
 
-    for (size_t i = 0; i < dyn_size; i++) {
+    for (size_t i = 0; i < dyn_count && dyn[i].d_tag != DT_NULL; i++) {
         switch (dyn[i].d_tag) {
             case DT_RELA: rela_offset = dyn[i].d_un.d_ptr; break;
             case DT_RELASZ: rela_sz = dyn[i].d_un.d_val; break;
@@ -516,55 +590,124 @@ void ElfParser::collect_imports() {
             case DT_PLTRELSZ: jmprel_sz = dyn[i].d_un.d_val; break;
             case DT_SYMTAB: symtab_offset = dyn[i].d_un.d_ptr; break;
             case DT_STRTAB: strtab_offset = dyn[i].d_un.d_ptr; break;
+            case DT_STRSZ: strtab_size = dyn[i].d_un.d_val; break;
+            case DT_HASH: hash_offset = dyn[i].d_un.d_ptr; break;
         }
     }
 
-    Elf64_Sym* symtab = (Elf64_Sym*)vaddr_to_ptr(symtab_offset);
-    char* strtab = (char*)vaddr_to_ptr(strtab_offset);
-    
-    if (!symtab || !strtab) {
-        // LOG_DBG("Could not map dynamic sections to local image");
-        return;
-    }
-
-    // Process DT_RELA (Data Relocations)
-    if (rela_offset != 0 && rela_sz > 0) {
-        Elf64_Rela* rela = (Elf64_Rela*)vaddr_to_ptr(rela_offset);
-        if (rela) {
-            size_t count = rela_sz / rela_ent;
-            for (size_t i = 0; i < count; i++) {
-                uint32_t type = ELF64_R_TYPE(rela[i].r_info);
-                uint32_t sym_idx = ELF64_R_SYM(rela[i].r_info);
-                
-                if (type == R_X86_64_GLOB_DAT || type == R_X86_64_JUMP_SLOT) {
-                    if (sym_idx != 0) {
-                        if (symtab[sym_idx].st_shndx != SHN_UNDEF) {
-                            // Internal
-                            image.internal_relocs.push_back(rela[i].r_offset);
-                            uint64_t* patch_loc = (uint64_t*)(image.raw_image.data() + rela[i].r_offset);
-                            *patch_loc = symtab[sym_idx].st_value;
-                        } else {
-                            // External
-                            std::string name = strtab + symtab[sym_idx].st_name;
-                            image.pending_imports.push_back({name, rela[i].r_offset, type});
-                        }
-                    }
-                }
+    size_t sym_count = 0;
+    if (ehdr->e_shnum > 0) {
+        const Elf64_Shdr* shdr =
+            (const Elf64_Shdr*)(file_data.data() + ehdr->e_shoff);
+        for (uint16_t i = 0; i < ehdr->e_shnum; i++) {
+            if ((shdr[i].sh_type == SHT_DYNSYM || shdr[i].sh_type == SHT_SYMTAB) &&
+                shdr[i].sh_addr == symtab_offset &&
+                shdr[i].sh_entsize == sizeof(Elf64_Sym)) {
+                sym_count = shdr[i].sh_size / sizeof(Elf64_Sym);
+                if (shdr[i].sh_link < ehdr->e_shnum && strtab_size == 0)
+                    strtab_size = shdr[shdr[i].sh_link].sh_size;
+                break;
             }
         }
     }
 
+    if (sym_count == 0 && hash_offset) {
+        uint32_t* hash = (uint32_t*)image_vaddr_ptr(image, hash_offset,
+                                                    2 * sizeof(uint32_t));
+        if (hash)
+            sym_count = hash[1];
+    }
+
+    if (!symtab_offset || !strtab_offset || !strtab_size || !sym_count) {
+        LOG_ERR("ELF dynamic symbol metadata is incomplete");
+        return;
+    }
+    if (sym_count > image.raw_image.size() / sizeof(Elf64_Sym)) {
+        LOG_ERR("ELF dynamic symbol count is out of bounds");
+        return;
+    }
+
+    Elf64_Sym* symtab = (Elf64_Sym*)image_vaddr_ptr(
+        image, symtab_offset, sym_count * sizeof(Elf64_Sym));
+    char* strtab = (char*)image_vaddr_ptr(image, strtab_offset, strtab_size);
+    
+    if (!symtab || !strtab) {
+        LOG_ERR("Dynamic symbol/string table is out of mapped image bounds");
+        return;
+    }
+
+    auto symbol_name = [&](uint32_t sym_idx) -> const char* {
+        if (sym_idx >= sym_count || symtab[sym_idx].st_name >= strtab_size)
+            return nullptr;
+        char* name = strtab + symtab[sym_idx].st_name;
+        size_t remaining = strtab_size - symtab[sym_idx].st_name;
+        return memchr(name, '\0', remaining) ? name : nullptr;
+    };
+
+    auto collect_rela = [&](uint64_t rela_vaddr, uint64_t rela_size,
+                            uint64_t rela_entry_size) {
+        if (!rela_vaddr || !rela_size) return;
+        if (rela_entry_size == 0) rela_entry_size = sizeof(Elf64_Rela);
+        if (rela_entry_size != sizeof(Elf64_Rela) ||
+            rela_size % sizeof(Elf64_Rela) != 0) {
+            LOG_ERR("Unsupported RELA entry size");
+            return;
+        }
+
+        size_t count = rela_size / sizeof(Elf64_Rela);
+        Elf64_Rela* rela = (Elf64_Rela*)image_vaddr_ptr(image, rela_vaddr,
+                                                        rela_size);
+        if (!rela) {
+            LOG_ERR("Relocation table out of mapped image bounds");
+            return;
+        }
+
+        for (size_t i = 0; i < count; i++) {
+            uint32_t type = ELF64_R_TYPE(rela[i].r_info);
+            uint32_t sym_idx = ELF64_R_SYM(rela[i].r_info);
+
+            if (type != R_X86_64_GLOB_DAT && type != R_X86_64_JUMP_SLOT)
+                continue;
+            if (sym_idx == 0 || sym_idx >= sym_count)
+                continue;
+
+            uint64_t* patch_loc = (uint64_t*)image_vaddr_ptr(
+                image, rela[i].r_offset, sizeof(uint64_t));
+            if (!patch_loc) {
+                LOG_ERR("Relocation target 0x%lx out of mapped image bounds",
+                        rela[i].r_offset);
+                continue;
+            }
+
+            if (symtab[sym_idx].st_shndx != SHN_UNDEF) {
+                image.internal_relocs.push_back(rela[i].r_offset);
+                *patch_loc = symtab[sym_idx].st_value;
+            } else {
+                const char* name = symbol_name(sym_idx);
+                if (!name || name[0] == '\0') {
+                    LOG_ERR("Invalid external symbol name at relocation %zu", i);
+                    continue;
+                }
+                image.pending_imports.push_back({name, rela[i].r_offset, type});
+            }
+        }
+    };
+
+    collect_rela(rela_offset, rela_sz, rela_ent);
+
     /* Collect .init_array entries from DT_INIT_ARRAY / DT_INIT_ARRAYSZ */
     {
         uint64_t init_arr_addr = 0, init_arr_sz = 0;
-        for (size_t i = 0; i < dyn_size; i++) {
+        for (size_t i = 0; i < dyn_count && dyn[i].d_tag != DT_NULL; i++) {
             if (dyn[i].d_tag == DT_INIT_ARRAY)
                 init_arr_addr = dyn[i].d_un.d_ptr;
             if (dyn[i].d_tag == DT_INIT_ARRAYSZ)
                 init_arr_sz = dyn[i].d_un.d_val;
         }
-        if (init_arr_addr && init_arr_sz) {
-            uint64_t *arr = (uint64_t *)vaddr_to_ptr(init_arr_addr);
+        if (init_arr_addr && init_arr_sz &&
+            init_arr_sz % sizeof(uint64_t) == 0) {
+            uint64_t *arr = (uint64_t *)image_vaddr_ptr(image, init_arr_addr,
+                                                        init_arr_sz);
             size_t count = init_arr_sz / sizeof(uint64_t);
             if (arr) {
                 for (size_t i = 0; i < count; i++) {
@@ -576,59 +719,24 @@ void ElfParser::collect_imports() {
         }
     }
 
-    // Process DT_JMPREL (PLT Relocations - Functions)
-    if (jmprel_offset != 0 && jmprel_sz > 0) {
-        Elf64_Rela* rela = (Elf64_Rela*)vaddr_to_ptr(jmprel_offset);
-        if (rela) {
-            size_t count = jmprel_sz / sizeof(Elf64_Rela); 
-            for (size_t i = 0; i < count; i++) {
-                uint32_t type = ELF64_R_TYPE(rela[i].r_info);
-                uint32_t sym_idx = ELF64_R_SYM(rela[i].r_info);
-                
-                if (type == R_X86_64_JUMP_SLOT || type == R_X86_64_GLOB_DAT) {
-                    if (sym_idx != 0) {
-                        if (symtab[sym_idx].st_shndx != SHN_UNDEF) {
-                            // Internal
-                            image.internal_relocs.push_back(rela[i].r_offset);
-                            uint64_t* patch_loc = (uint64_t*)(image.raw_image.data() + rela[i].r_offset);
-                            *patch_loc = symtab[sym_idx].st_value;
-                        } else {
-                            // External
-                            std::string name = strtab + symtab[sym_idx].st_name;
-                            image.pending_imports.push_back({name, rela[i].r_offset, type});
-                        }
-                    }
-                }
-            }
-        }
-    }
+    collect_rela(jmprel_offset, jmprel_sz, sizeof(Elf64_Rela));
 }
 
 /**
  * ElfParser::relocate_base - Apply base relocations
  */
 bool ElfParser::relocate_base(uint64_t target_base) {
-    // Helper to find segment pointer
-    auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
-        for(const auto& seg : image.segments) {
-            if(vaddr >= seg.virtual_address && vaddr < seg.virtual_address + seg.memory_size) {
-                // Check if offset is within file size (data exists)
-                if (vaddr < seg.virtual_address + seg.file_size) {
-                    return image.raw_image.data() + (vaddr - image.segments[0].virtual_address);
-                }
-            }
-        }
-        return nullptr;
-    };
-
     // Find DYNAMIC segment
     Elf64_Dyn* dyn = nullptr;
-    uint64_t dyn_size = 0;
+    size_t dyn_count = 0;
     
     for (int i = 0; i < ehdr->e_phnum; i++) {
         if (phdr[i].p_type == PT_DYNAMIC) {
+            if (phdr[i].p_filesz % sizeof(Elf64_Dyn) != 0 ||
+                !range_fits(file_data.size(), phdr[i].p_offset, phdr[i].p_filesz))
+                return false;
             dyn = (Elf64_Dyn*)(file_data.data() + phdr[i].p_offset);
-            dyn_size = phdr[i].p_filesz / sizeof(Elf64_Dyn);
+            dyn_count = phdr[i].p_filesz / sizeof(Elf64_Dyn);
             break;
         }
     }
@@ -639,7 +747,7 @@ bool ElfParser::relocate_base(uint64_t target_base) {
     uint64_t rela_sz = 0;
     uint64_t rela_ent = 0;
 
-    for (size_t i = 0; i < dyn_size; i++) {
+    for (size_t i = 0; i < dyn_count && dyn[i].d_tag != DT_NULL; i++) {
         switch (dyn[i].d_tag) {
             case DT_RELA: rela_offset = dyn[i].d_un.d_ptr; break;
             case DT_RELASZ: rela_sz = dyn[i].d_un.d_val; break;
@@ -648,19 +756,24 @@ bool ElfParser::relocate_base(uint64_t target_base) {
     }
 
     if (rela_offset == 0) return true; // No relocations needed
+    if (rela_ent == 0) rela_ent = sizeof(Elf64_Rela);
+    if (rela_ent != sizeof(Elf64_Rela) ||
+        rela_sz % sizeof(Elf64_Rela) != 0)
+        return false;
 
-    Elf64_Rela* rela = (Elf64_Rela*)vaddr_to_ptr(rela_offset);
+    Elf64_Rela* rela = (Elf64_Rela*)image_vaddr_ptr(image, rela_offset, rela_sz);
     if (!rela) {
         LOG_DBG("Could not map relocation table");
         return false;
     }
 
-    size_t count = rela_sz / rela_ent;
+    size_t count = rela_sz / sizeof(Elf64_Rela);
     int rel_count = 0;
 
     for (size_t i = 0; i < count; i++) {
         uint32_t type = ELF64_R_TYPE(rela[i].r_info);
-        uint64_t *target = (uint64_t *)vaddr_to_ptr(rela[i].r_offset);
+        uint64_t *target = (uint64_t *)image_vaddr_ptr(image, rela[i].r_offset,
+                                                       sizeof(uint64_t));
 
         if (!target)
             continue;
@@ -702,7 +815,8 @@ bool ElfParser::relocate_base(uint64_t target_base) {
     
     // Also handle internal GOT entries (discovered during import collection)
     for (uint64_t offset : image.internal_relocs) {
-        uint64_t* target = (uint64_t*)vaddr_to_ptr(offset);
+        uint64_t* target = (uint64_t*)image_vaddr_ptr(image, offset,
+                                                      sizeof(uint64_t));
         if (target) {
             // The value at *target is already the internal offset (st_value)
             // We just add the base.
@@ -736,24 +850,14 @@ bool ElfParser::resolve_imports(RemoteReader& reader) {
             return false;
         }
         
-        // Patch the GOT/PLT entry in our LOCAL raw image
-        // imp.offset is the VADDR in the image
-        // We need to map this VADDR to our local buffer
-        auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
-            for(const auto& seg : image.segments) {
-                if(vaddr >= seg.virtual_address && vaddr < seg.virtual_address + seg.file_size) {
-                    return image.raw_image.data() + (vaddr - image.segments[0].virtual_address);
-                }
-            }
-            return nullptr;
-        };
-
-        uint64_t* patch_loc = (uint64_t*)vaddr_to_ptr(imp.offset); 
+        uint64_t* patch_loc = (uint64_t*)image_vaddr_ptr(
+            image, imp.offset, sizeof(uint64_t));
         if (patch_loc) {
             *patch_loc = remote_addr;
             resolved_count++;
         } else {
             LOG_ERR("Failed to patch import at offset %lx (out of bounds)", imp.offset);
+            return false;
         }
     }
     
@@ -765,53 +869,41 @@ bool ElfParser::resolve_imports(RemoteReader& reader) {
  * ElfParser::get_symbol_offset - Lookup a symbol offset in the local image
  */
 uint64_t ElfParser::get_symbol_offset(const std::string& name) {
-    auto vaddr_to_ptr = [&](uint64_t vaddr) -> uint8_t* {
-        for(const auto& seg : image.segments) {
-            if(vaddr >= seg.virtual_address && vaddr < seg.virtual_address + seg.memory_size) {
-                if (vaddr < seg.virtual_address + seg.file_size) {
-                    return image.raw_image.data() + (vaddr - image.segments[0].virtual_address);
-                }
-            }
-        }
-        return nullptr;
-    };
+    if (ehdr->e_shnum == 0)
+        return 0;
 
-    // Helper to find Dynamic Section (repeated logic, should be refactored but safe here)
-    Elf64_Dyn* dyn = nullptr;
-    uint64_t dyn_size = 0;
-    for (int i = 0; i < ehdr->e_phnum; i++) {
-        if (phdr[i].p_type == PT_DYNAMIC) {
-            dyn = (Elf64_Dyn*)(file_data.data() + phdr[i].p_offset);
-            dyn_size = phdr[i].p_filesz / sizeof(Elf64_Dyn);
-            break;
-        }
-    }
-    if (!dyn) return 0;
+    const Elf64_Shdr* shdr =
+        (const Elf64_Shdr*)(file_data.data() + ehdr->e_shoff);
 
-    uint64_t symtab_off = 0, strtab_off = 0;
-    
-    for (size_t i = 0; i < dyn_size; i++) {
-        if (dyn[i].d_tag == DT_SYMTAB) symtab_off = dyn[i].d_un.d_ptr;
-        if (dyn[i].d_tag == DT_STRTAB) strtab_off = dyn[i].d_un.d_ptr;
-    }
-    
-    if (!symtab_off || !strtab_off) return 0;
-    
-    Elf64_Sym* symtab = (Elf64_Sym*)vaddr_to_ptr(symtab_off);
-    char* strtab = (char*)vaddr_to_ptr(strtab_off);
-    
-    if (!symtab || !strtab) return 0;
-    
-    // We don't know the number of symbols easily without hash table
-    // But we can iterate until we hit invalid memory or a reasonable limit
-    // Heuristic: iterate 5000 symbols max
-    for (int i = 0; i < 5000; i++) {
-        // Basic bounds check (unsafe if we are at end of page, but ok for now)
-        if (symtab[i].st_name == 0 && i > 0 && symtab[i].st_value == 0) continue; 
-        
-        const char* sym_name = strtab + symtab[i].st_name;
-        if (name == sym_name) {
-            return symtab[i].st_value;
+    for (uint16_t s = 0; s < ehdr->e_shnum; s++) {
+        if (shdr[s].sh_type != SHT_DYNSYM && shdr[s].sh_type != SHT_SYMTAB)
+            continue;
+        if (shdr[s].sh_entsize != sizeof(Elf64_Sym) ||
+            shdr[s].sh_link >= ehdr->e_shnum ||
+            !range_fits(file_data.size(), shdr[s].sh_offset, shdr[s].sh_size))
+            continue;
+
+        const Elf64_Shdr& str_sh = shdr[shdr[s].sh_link];
+        if (str_sh.sh_type != SHT_STRTAB ||
+            !range_fits(file_data.size(), str_sh.sh_offset, str_sh.sh_size))
+            continue;
+
+        const Elf64_Sym* symtab =
+            (const Elf64_Sym*)(file_data.data() + shdr[s].sh_offset);
+        const char* strtab =
+            (const char*)(file_data.data() + str_sh.sh_offset);
+        size_t sym_count = shdr[s].sh_size / sizeof(Elf64_Sym);
+        size_t str_size = str_sh.sh_size;
+
+        for (size_t i = 0; i < sym_count; i++) {
+            if (symtab[i].st_name >= str_size)
+                continue;
+            const char* sym_name = strtab + symtab[i].st_name;
+            size_t remaining = str_size - symtab[i].st_name;
+            if (!memchr(sym_name, '\0', remaining))
+                continue;
+            if (name == sym_name)
+                return symtab[i].st_value;
         }
     }
     
@@ -903,12 +995,9 @@ public:
         LOG_INFO("Payload written (%zu bytes)", img.total_size);
 
         /*
-         * Stealth (VMA hide) is deferred — applying it before
-         * execution causes SIGSEGV on TLB misses. The payload can
-         * request stealth later via ioctl once fully initialized.
-         *
-         * TODO: implement deferred stealth from within ManualMapEntry
-         * after all pages have been faulted in (mlock equivalent).
+         * Stealth (VMA hide) is intentionally not applied here.
+         * Hiding before all pages have faulted in can SIGSEGV the target;
+         * a future implementation must make deferred hiding page-fault-safe.
          */
 
         /* Step 6: Execute ManualMapEntry via thread hijack */
@@ -920,8 +1009,8 @@ public:
             LOG_INFO("Entry: ManualMapEntry at +0x%lx", manual_entry);
             thread.start_address = alloc.address + manual_entry;
         } else {
-            LOG_INFO("Entry: ELF entry at +0x%lx", img.entry_point);
-            thread.start_address = alloc.address + img.entry_point;
+            LOG_ERR("ManualMapEntry export not found");
+            return false;
         }
 
         if (ioctl(driver_fd, SNAKE_IOCTL_INJECT_THREAD, &thread) < 0) {

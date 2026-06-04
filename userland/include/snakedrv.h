@@ -23,10 +23,23 @@
  * Version & Device Information
  * ============================================================================ */
 
-#define SNAKEDRV_VERSION_MAJOR      1
+#define SNAKEDRV_VERSION_MAJOR      2
 #define SNAKEDRV_VERSION_MINOR      0
 #define SNAKEDRV_VERSION_PATCH      0
-#define SNAKEDRV_VERSION_STRING     "1.0.0"
+#define SNAKEDRV_VERSION_STRING     "2.0.0"
+
+/*
+ * Wire-compatibility ABI version.
+ *
+ * Bumped ONLY when an existing IOCTL changes its struct layout, semantics,
+ * or is removed. Adding new IOCTLs or appending into reserved[] regions of
+ * existing structs does NOT bump the ABI.
+ *
+ * Userland clients should compare this against the value returned by
+ * SNAKE_IOCTL_GET_INFO.abi_version and refuse to operate if the running
+ * driver reports a lower ABI than the one the client was built against.
+ */
+#define SNAKEDRV_ABI_VERSION        2
 
 #define SNAKEDRV_DEVICE_NAME        "snakedrv"
 #define SNAKEDRV_DEVICE_PATH        "/dev/snakedrv"
@@ -384,24 +397,34 @@ struct snake_virt_to_phys {
 /**
  * @struct snake_driver_info
  * @brief Driver information and capabilities
+ *
+ * NOTE on layout: appending fields at the end of this struct changes the
+ * struct size, which in turn changes the IOCTL number encoded by _IOR().
+ * That means any field addition is a breaking change at the IOCTL level.
+ * To grow the struct without bumping SNAKEDRV_ABI_VERSION, repurpose bytes
+ * from `reserved[]`.
  */
 struct snake_driver_info {
     uint32_t        version_major;
     uint32_t        version_minor;
     uint32_t        version_patch;
     char            version_string[32];
-    
+
     uint32_t        capabilities;   /* Capability flags */
     uint32_t        max_breakpoints;/* Maximum hardware breakpoints */
     uint32_t        max_attached;   /* Maximum attached processes */
-    
+
     uint64_t        kernel_version; /* Running kernel version */
     char            kernel_release[64];
-    
+
     uint32_t        arch;           /* Architecture (x86_64 = 1) */
     uint32_t        page_size;      /* System page size */
-    
+
     int32_t         result;
+
+    /* === Added in ABI 1 === */
+    uint32_t        abi_version;    /* SNAKEDRV_ABI_VERSION reported by the driver */
+    uint8_t         reserved[16];   /* Zero-filled; for future fields within ABI 1 */
 } __attribute__((packed));
 
 /* Capability flags */

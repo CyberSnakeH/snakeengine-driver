@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.10)
-project(libsnakedrv VERSION 1.0.0 LANGUAGES CXX)
+project(libsnakedrv VERSION 2.0.0 LANGUAGES CXX)
 
 # Options
 option(BUILD_SHARED_LIBS "Build shared library" ON)
@@ -17,6 +17,7 @@ include_directories(include)
 set(SOURCES
     src/libsnakedrv.cpp
     src/libsnakedrv_scanner.cpp
+    src/snakedrv_injector.cpp
 )
 
 # Headers
@@ -55,3 +56,33 @@ set(CPACK_PACKAGE_NAME "libsnakedrv")
 set(CPACK_PACKAGE_VENDOR "SnakeEngine Project")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "SnakeEngine Driver Userland Library")
 include(CPack)
+
+if(SNAKEDRV_BUILD_TESTS)
+    enable_testing()
+
+    add_library(manual_map_payload SHARED
+        selftests/manual_map_payload.cpp
+    )
+    set_target_properties(manual_map_payload PROPERTIES
+        LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/tests"
+        PREFIX ""
+    )
+
+    add_executable(test_manualmap_elf
+        selftests/test_manualmap_elf.cpp
+        src/snakedrv_injector.cpp
+    )
+    target_include_directories(test_manualmap_elf PRIVATE include)
+
+    add_test(NAME manualmap_elf
+        COMMAND test_manualmap_elf "$<TARGET_FILE:manual_map_payload>"
+    )
+
+    add_executable(test_ioctl_abi
+        selftests/test_ioctl_abi.cpp
+    )
+    target_include_directories(test_ioctl_abi PRIVATE include)
+    add_test(NAME ioctl_abi
+        COMMAND test_ioctl_abi
+    )
+endif()

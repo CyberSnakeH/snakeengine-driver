@@ -55,6 +55,7 @@
 #include "snakedrv_backend.h"
 #include "snakedrv_scanner.h"
 #include "snakedrv_injector.h"
+#include "snakedrv_benchmark.h"
 
 /* Forward declarations for backend private data */
 struct process_context {
@@ -62,6 +63,16 @@ struct process_context {
     struct task_struct *task;
     struct mm_struct *mm;
 };
+
+static struct snake_scan_options global_scan_options = {
+    .enable_parallel = 0,
+    .enable_bloom = 1,
+    .enable_prefetch = 1,
+    .enable_huge_pages = 1,
+    .default_threads = 0,
+    .bloom_fpr = 10,
+};
+static DEFINE_MUTEX(scan_options_mutex);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("SnakeEngine Project");
@@ -97,6 +108,19 @@ MODULE_PARM_DESC(param_debug, "Debug level 0-3 (default: 1)");
 static int param_event_queue_size = 256;
 module_param_named(event_queue_size, param_event_queue_size, int, 0644);
 MODULE_PARM_DESC(param_event_queue_size, "Maximum pending debug events (default: 256)");
+
+static int snakedrv_abi_version_get(char *buffer, const struct kernel_param *kp)
+{
+    (void)kp;
+    return scnprintf(buffer, PAGE_SIZE, "%u\n", SNAKEDRV_ABI_VERSION);
+}
+
+static const struct kernel_param_ops snakedrv_abi_version_ops = {
+    .get = snakedrv_abi_version_get,
+};
+
+module_param_cb(abi_version, &snakedrv_abi_version_ops, NULL, 0444);
+MODULE_PARM_DESC(abi_version, "SnakeEngine driver ABI version");
 
 /* ============================================================================
  * Debug Macros
@@ -870,190 +894,162 @@ slot_found:
 
 
 
-static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
-
+static int validate_breakpoint_address(struct task_struct *target,
+                                       struct snake_hw_breakpoint *bp,
+                                       unsigned int bp_len_bytes)
 {
+    struct mm_struct *mm;
+    struct vm_area_struct *vma;
+    unsigned long start;
+    unsigned long end;
+    int ret = 0;
 
+    if (bp->address != (uint64_t)(unsigned long)bp->address ||
+        bp->address == 0) {
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
+        return -EINVAL;
+    }
+
+    start = (unsigned long)bp->address;
+    if (check_add_overflow(start, (unsigned long)bp_len_bytes, &end) ||
+        end <= start || !IS_ALIGNED(start, bp_len_bytes)) {
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
+        return -EINVAL;
+    }
+
+    mm = get_task_mm(target);
+    if (!mm) {
+        bp->result = SNAKEDRV_ERROR_NO_PROCESS;
+        return -EINVAL;
+    }
+
+    mmap_read_lock(mm);
+    vma = find_vma(mm, start);
+    if (!vma || vma->vm_start > start || vma->vm_end < end) {
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
+        ret = -EFAULT;
+    }
+    mmap_read_unlock(mm);
+    mmput(mm);
+
+    return ret;
+}
+
+static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
+{
     struct perf_event_attr attr;
-
     struct perf_event *perf_bp;
-
     struct task_struct *target;
-
     int slot = -1;
-
     int i;
-
     int bp_type;
-
     int bp_len;
-
-    
-
-    /* Find free slot */
+    unsigned int bp_len_bytes;
+    int ret;
 
     for (i = 0; i < HBP_NUM; i++) {
-
         if (!p->bp_slots[i].used) {
-
             slot = i;
-
             break;
-
         }
-
     }
-
-    
 
     if (slot < 0) {
-
         bp->result = SNAKEDRV_ERROR_NO_BP_SLOT;
-
         return -ENOSPC;
-
     }
-
-    
 
     switch (bp->type) {
-
     case SNAKE_BP_TYPE_EXEC:
-
         bp_type = HW_BREAKPOINT_X;
-
         break;
-
     case SNAKE_BP_TYPE_WRITE:
-
         bp_type = HW_BREAKPOINT_W;
-
         break;
-
     case SNAKE_BP_TYPE_RW:
-
         bp_type = HW_BREAKPOINT_RW;
-
         break;
-
     default:
-
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
         return -EINVAL;
-
     }
-
-
 
     switch (bp->length) {
-
     case SNAKE_BP_LEN_1:
-
         bp_len = HW_BREAKPOINT_LEN_1;
-
+        bp_len_bytes = 1;
         break;
-
     case SNAKE_BP_LEN_2:
-
         bp_len = HW_BREAKPOINT_LEN_2;
-
+        bp_len_bytes = 2;
         break;
-
-    case SNAKE_BP_LEN_8:
-
-        bp_len = HW_BREAKPOINT_LEN_8;
-
-        break;
-
     case SNAKE_BP_LEN_4:
-
-    default:
-
         bp_len = HW_BREAKPOINT_LEN_4;
-
+        bp_len_bytes = 4;
         break;
-
+    case SNAKE_BP_LEN_8:
+        bp_len = HW_BREAKPOINT_LEN_8;
+        bp_len_bytes = 8;
+        break;
+    default:
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
+        return -EINVAL;
     }
 
-
+    if (bp->type == SNAKE_BP_TYPE_EXEC && bp_len_bytes != 1) {
+        bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
+        return -EINVAL;
+    }
 
     if (!bp->enabled) {
-
         bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
-
         return -EINVAL;
-
     }
-
-
 
     target = get_thread_task(p, bp->tid);
-
     if (!target) {
-
         bp->result = SNAKEDRV_ERROR_NO_PROCESS;
-
         return -ESRCH;
-
     }
 
-    
+    ret = validate_breakpoint_address(target, bp, bp_len_bytes);
+    if (ret) {
+        put_task_struct(target);
+        return ret;
+    }
 
     hw_breakpoint_init(&attr);
-
     attr.bp_addr = bp->address;
-
     attr.bp_len = bp_len;
-
     attr.bp_type = bp_type;
 
-    
-
     perf_bp = register_user_hw_breakpoint(&attr, bp_handler, NULL, target);
-
     if (IS_ERR(perf_bp)) {
-
-        SDRV_ERR("Failed to register BP: %ld\n", PTR_ERR(perf_bp));
-
+        ret = PTR_ERR(perf_bp);
+        bp->result = ret;
+        SDRV_ERR("Failed to register BP: %d\n", ret);
         put_task_struct(target);
-
-        return PTR_ERR(perf_bp);
-
+        return ret;
     }
 
     p->bp_slots[slot].perf_bp = perf_bp;
-
-    
-
     p->bp_slots[slot].used = true;
-
     p->bp_slots[slot].id = slot + (p->pid << 8);
-
     p->bp_slots[slot].address = bp->address;
-
     p->bp_slots[slot].type = bp->type;
-
     p->bp_slots[slot].length = bp_len;
-
     p->bp_slots[slot].tid = bp->tid;
-
     p->bp_slots[slot].enabled = true;
 
-    
-
     bp->slot = slot;
-
     bp->id = p->bp_slots[slot].id;
-
     bp->result = SNAKEDRV_SUCCESS;
 
-    
-
-    SDRV_INFO("Set BP: pid=%d slot=%d addr=0x%llx\n", p->pid, slot, bp->address);
+    SDRV_INFO("Set BP: pid=%d slot=%d addr=0x%llx\n",
+              p->pid, slot, bp->address);
 
     put_task_struct(target);
-
     return 0;
-
 }
 
 
@@ -1100,6 +1096,77 @@ static int do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoi
 
 }
 
+static void add_perf_counters(struct snake_perf_stats *out,
+                              struct scan_perf_counters *counters)
+{
+    u64 scans = atomic64_read(&counters->total_scans);
+    u64 bytes = atomic64_read(&counters->total_bytes);
+    u64 matches = atomic64_read(&counters->total_matches);
+    u64 time_ns = atomic64_read(&counters->total_time_ns);
+    s64 min_ns = atomic64_read(&counters->min_time_ns);
+    u64 max_ns = atomic64_read(&counters->max_time_ns);
+    u64 parallel = atomic64_read(&counters->parallel_scans);
+    u64 cache_hits = atomic64_read(&counters->cache_hits);
+    u64 cache_misses = atomic64_read(&counters->cache_misses);
+
+    out->total_scans += scans;
+    out->total_bytes += bytes;
+    out->total_matches += matches;
+    out->total_time_ns += time_ns;
+    out->huge_page_scans += atomic64_read(&counters->huge_page_scans);
+
+    if (scans) {
+        out->avg_latency_us += (time_ns / scans) / 1000;
+        if (min_ns != LLONG_MAX &&
+            (out->min_latency_us == 0 || (u64)min_ns / 1000 < out->min_latency_us))
+            out->min_latency_us = (u64)min_ns / 1000;
+        if (max_ns / 1000 > out->max_latency_us)
+            out->max_latency_us = max_ns / 1000;
+        out->parallel_ratio += (parallel * 100) / scans;
+    }
+
+    if (time_ns) {
+        out->throughput_mbps += (bytes * 1000) / (time_ns / 1000000 + 1);
+        out->matches_per_sec += (matches * 1000000000) / time_ns;
+    }
+
+    if (cache_hits + cache_misses)
+        out->cache_hit_rate += (cache_hits * 100) / (cache_hits + cache_misses);
+}
+
+static void fill_scanner_perf_stats(struct snake_perf_stats *out)
+{
+    u64 measured_groups = 0;
+
+    memset(out, 0, sizeof(*out));
+
+#define ADD_GROUP(counters) do {                                      \
+    if (atomic64_read(&(counters).total_scans))                       \
+        measured_groups++;                                            \
+    add_perf_counters(out, &(counters));                              \
+} while (0)
+
+    ADD_GROUP(global_perf_stats.exact_value);
+    ADD_GROUP(global_perf_stats.pattern);
+    ADD_GROUP(global_perf_stats.changed);
+    ADD_GROUP(global_perf_stats.unchanged);
+    ADD_GROUP(global_perf_stats.float_scan);
+    ADD_GROUP(global_perf_stats.double_scan);
+    ADD_GROUP(global_perf_stats.string_ascii);
+    ADD_GROUP(global_perf_stats.string_unicode);
+    ADD_GROUP(global_perf_stats.pointer_chain);
+
+#undef ADD_GROUP
+
+    if (measured_groups) {
+        out->avg_latency_us /= measured_groups;
+        out->throughput_mbps /= measured_groups;
+        out->matches_per_sec /= measured_groups;
+        out->cache_hit_rate /= measured_groups;
+        out->parallel_ratio /= measured_groups;
+    }
+}
+
 /* ============================================================================
  * IOCTL Handler
  * ============================================================================ */
@@ -1139,7 +1206,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
     case SNAKE_IOCTL_GET_INFO: {
         struct snake_driver_info info = {0};
-        
+
         info.version_major = SNAKEDRV_VERSION_MAJOR;
         info.version_minor = SNAKEDRV_VERSION_MINOR;
         info.version_patch = SNAKEDRV_VERSION_PATCH;
@@ -1147,7 +1214,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
                sizeof(info.version_string));
         strscpy(info.kernel_release, init_uts_ns.name.release,
                sizeof(info.kernel_release));
-        
+
         info.capabilities = SNAKE_CAP_HW_BREAKPOINTS |
                             SNAKE_CAP_MULTITHREAD |
                             SNAKE_CAP_PHYS_MEMORY |
@@ -1156,8 +1223,9 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         info.max_breakpoints = HBP_NUM;
         info.max_attached = param_max_attached;
         info.page_size = PAGE_SIZE;
+        info.abi_version = SNAKEDRV_ABI_VERSION;
         info.result = SNAKEDRV_SUCCESS;
-        
+
         if (copy_to_user(uarg, &info, sizeof(info)))
             ret = -EFAULT;
         break;
@@ -1950,12 +2018,68 @@ skip_vma_scan:
         }
 
         /* Cache the result set for potential rescans */
+        result_set->scan_type = exec.params.scan_type;
         exec.result_set_id = scanner_cache_add(result_set);
         exec.result = 0;
 
         if (copy_to_user(uarg, &exec, sizeof(exec)))
             ret = -EFAULT;
 
+        break;
+    }
+
+    case SNAKE_IOCTL_SCAN_GET_RESULTS: {
+        struct snake_scan_execute exec;
+        struct scan_result_set *set;
+        uint32_t count, i;
+
+        if (copy_from_user(&exec, uarg, sizeof(exec)))
+            return -EFAULT;
+
+        set = scanner_cache_get(exec.params.result_set_id);
+        if (!set) {
+            exec.result = -ENOENT;
+            if (copy_to_user(uarg, &exec, sizeof(exec)))
+                return -EFAULT;
+            return -ENOENT;
+        }
+
+        count = min(set->count, exec.results_capacity);
+        exec.results_count = count;
+        exec.total_matches = set->count;
+        exec.result_set_id = set->id;
+        exec.result = 0;
+
+        if (count > 0 && exec.results) {
+            struct snake_scan_result *user_results;
+
+            user_results = kvmalloc_array(count, sizeof(*user_results),
+                                          GFP_KERNEL | __GFP_ZERO);
+            if (!user_results) {
+                scanner_cache_put(set);
+                return -ENOMEM;
+            }
+
+            for (i = 0; i < count; i++) {
+                user_results[i].address = set->results[i].address;
+                user_results[i].value = set->results[i].value;
+                user_results[i].size = exec.params.value_type;
+                user_results[i].region_index = 0;
+            }
+
+            if (copy_to_user((void __user *)exec.results, user_results,
+                             count * sizeof(*user_results))) {
+                kvfree(user_results);
+                scanner_cache_put(set);
+                return -EFAULT;
+            }
+            kvfree(user_results);
+        }
+
+        scanner_cache_put(set);
+
+        if (copy_to_user(uarg, &exec, sizeof(exec)))
+            ret = -EFAULT;
         break;
     }
 
@@ -1968,6 +2092,100 @@ skip_vma_scan:
         if (result_set_id > 0)
             scanner_cache_remove(result_set_id);
 
+        break;
+    }
+
+    case SNAKE_IOCTL_SCAN_GET_INFO: {
+        struct snake_scan_result_set_info info;
+        struct scan_result_set *set;
+
+        if (copy_from_user(&info, uarg, sizeof(info)))
+            return -EFAULT;
+
+        set = scanner_cache_get(info.result_set_id);
+        if (!set)
+            return -ENOENT;
+
+        info.count = set->count;
+        info.scan_type = set->scan_type;
+        info.has_bloom = set->use_bloom ? 1 : 0;
+        info.memory_usage = sizeof(*set) +
+            ((u64)set->max_results * sizeof(*set->results));
+
+        scanner_cache_put(set);
+
+        if (copy_to_user(uarg, &info, sizeof(info)))
+            ret = -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_GET_BACKEND_INFO: {
+        struct snake_backend_info info = {0};
+
+        info.backend_type = BACKEND_PROCESS;
+        info.supports_huge_pages = 0;
+        info.supports_parallel = 1;
+        info.page_size = PAGE_SIZE;
+        strscpy(info.name, "process", sizeof(info.name));
+
+        if (copy_to_user(uarg, &info, sizeof(info)))
+            ret = -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_SET_BACKEND: {
+        uint32_t backend;
+
+        if (copy_from_user(&backend, uarg, sizeof(backend)))
+            return -EFAULT;
+
+        if (backend != BACKEND_AUTO && backend != BACKEND_PROCESS)
+            return -EINVAL;
+        break;
+    }
+
+    case SNAKE_IOCTL_GET_PERF_STATS: {
+        struct snake_perf_stats stats;
+
+        fill_scanner_perf_stats(&stats);
+        if (copy_to_user(uarg, &stats, sizeof(stats)))
+            ret = -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_RESET_PERF_STATS:
+        snakedrv_perf_init(&global_perf_stats);
+        break;
+
+    case SNAKE_IOCTL_GET_SCAN_OPTIONS: {
+        struct snake_scan_options options;
+
+        mutex_lock(&scan_options_mutex);
+        options = global_scan_options;
+        mutex_unlock(&scan_options_mutex);
+
+        if (copy_to_user(uarg, &options, sizeof(options)))
+            ret = -EFAULT;
+        break;
+    }
+
+    case SNAKE_IOCTL_SET_SCAN_OPTIONS: {
+        struct snake_scan_options options;
+
+        if (copy_from_user(&options, uarg, sizeof(options)))
+            return -EFAULT;
+
+        if (options.bloom_fpr > 1000)
+            return -EINVAL;
+
+        mutex_lock(&scan_options_mutex);
+        global_scan_options.enable_parallel = options.enable_parallel ? 1 : 0;
+        global_scan_options.enable_bloom = options.enable_bloom ? 1 : 0;
+        global_scan_options.enable_prefetch = options.enable_prefetch ? 1 : 0;
+        global_scan_options.enable_huge_pages = options.enable_huge_pages ? 1 : 0;
+        global_scan_options.default_threads = options.default_threads;
+        global_scan_options.bloom_fpr = options.bloom_fpr;
+        mutex_unlock(&scan_options_mutex);
         break;
     }
 
