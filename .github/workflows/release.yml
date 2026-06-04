@@ -2,32 +2,161 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags:
+      - 'v*'
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to release (e.g. v2.0.1)'
+        required: true
+
+permissions:
+  contents: write
+  id-token: write
+
+env:
+  COSIGN_YES: 'true'
 
 jobs:
-  userland_release:
-    name: Userland Release
+  metadata:
+    name: Resolve version metadata
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install deps
+      - name: Compute version and tag
+        id: version
+        shell: bash
         run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake g++ make
+          set -euo pipefail
+          if [ -n "${{ inputs.tag }}" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
 
-      - name: Build and package
-        run: |
-          cmake -S userland -B userland/build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=${{ github.workspace }}/dist
-          cmake --build userland/build -j2
-          cmake --install userland/build
-          tar -czf snakedrv-userland-${{ github.ref_name }}.tar.gz -C dist .
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "Release tags must look like vX.Y.Z, got '$tag'" >&2; exit 1 ;;
+          esac
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Releasing $tag"
+
+  release:
+    name: Build, sign, and publish source release
+    runs-on: ubuntu-22.04
+    needs: metadata
+    steps:
+      - uses: actions/checkout@v4
         with:
-          files: snakedrv-userland-${{ github.ref_name }}.tar.gz
+          ref: ${{ needs.metadata.outputs.tag }}
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+          cache-dependency-path: tools/sigstore-verify/go.sum
+
+      - name: Verify tag matches driver header version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.metadata.outputs.version }}"
+          header="userland/include/snakedrv.h"
+          major="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_MAJOR/{print $3}' "$header")"
+          minor="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_MINOR/{print $3}' "$header")"
+          patch="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_PATCH/{print $3}' "$header")"
+          header_version="$major.$minor.$patch"
+          if [ "$header_version" != "$version" ]; then
+            echo "Tag version $version does not match header version $header_version" >&2
+            exit 1
+          fi
+
+      - name: Build sigstore verifier
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          make -C tools/sigstore-verify VERSION="$VERSION"
+          ./tools/sigstore-verify/sigstore-verify version
+
+      - name: Build userland sanity check
+        run: |
+          set -euo pipefail
+          make -C userland print-version
+          make -C userland -j"$(nproc)"
+
+      - name: Create source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.metadata.outputs.version }}"
+          mkdir -p release
+          git archive --format=tar.gz \
+            --prefix="snakeengine-driver-$version/" \
+            -o "release/snakeengine-driver-$version.tar.gz" \
+            HEAD
+          sha256sum "release/snakeengine-driver-$version.tar.gz" \
+            > "release/snakeengine-driver-$version.tar.gz.sha256"
+          install -m 0755 tools/sigstore-verify/sigstore-verify \
+            "release/sigstore-verify-$version-linux-amd64"
+
+      - uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign release artifacts with cosign keyless
+        working-directory: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64; do
+            cosign sign-blob --bundle "${f}.sigstore" "$f"
+          done
+          sha256sum snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64 \
+            | LC_ALL=C sort > SHA256SUMS
+          ls -lh
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.metadata.outputs.tag }}
+          VERSION: ${{ needs.metadata.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          notes="$(mktemp)"
+          {
+            git tag -l --format='%(contents)' "$TAG" || true
+            cat <<'EOF'
+
+          ## Verifying release artifacts
+
+          This release publishes the source tarball consumed by
+          `snakedrv-updater`. The tarball and verifier binary are signed
+          with cosign keyless using GitHub OIDC.
+
+          ```bash
+          cosign verify-blob \
+            --bundle snakeengine-driver-VERSION.tar.gz.sigstore \
+            --certificate-identity-regexp \
+              '^https://github\.com/CyberSnakeH/snakeengine-driver/\.github/workflows/release\.yml@refs/tags/v.*$' \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            snakeengine-driver-VERSION.tar.gz
+          ```
+
+          See `SHA256SUMS` for checksums.
+          EOF
+          } | sed "s/VERSION/$VERSION/g" > "$notes"
+
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" \
+              --title "snakeengine-driver $VERSION" \
+              --notes-file "$notes" \
+              --verify-tag \
+              release/*
+          fi
