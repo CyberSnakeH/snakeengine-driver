@@ -1,0 +1,12 @@
+prefix=@PREFIX@
+exec_prefix=${prefix}
+libdir=@LIBDIR@
+includedir=@INCLUDEDIR@
+
+Name: snakedrv
+Description: SnakeEngine kernel driver — userland C/C++ library
+URL: https://github.com/CyberSnakeH/snakeengine-driver
+Version: @SNAKEDRV_VERSION@
+
+Libs: -L${libdir} -lsnakedrv
+Cflags: -I${includedir}

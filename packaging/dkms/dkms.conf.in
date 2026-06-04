@@ -1,0 +1,22 @@
+# DKMS configuration for snakeengine-driver.
+# Rendered from dkms.conf.in by the build (deploy.sh and the release
+# workflow) so PACKAGE_VERSION always matches the directory name under
+# /usr/src/.
+
+PACKAGE_NAME="snakedrv"
+PACKAGE_VERSION="@SNAKEDRV_VERSION@"
+
+CLEAN="make -C kernel clean"
+MAKE[0]="make -C kernel KDIR=/lib/modules/${kernelver}/build CC=${CC:-gcc}"
+
+BUILT_MODULE_NAME[0]="snakedrv"
+BUILT_MODULE_LOCATION[0]="kernel"
+DEST_MODULE_LOCATION[0]="/updates"
+
+AUTOINSTALL="yes"
+REMAKE_INITRD="no"
+
+# Module parameters can be tuned via /etc/modprobe.d/snakedrv.conf.
+#   max_attached_processes  Maximum attached processes (default: 16)
+#   event_queue_size        Maximum pending debug events (default: 256)
+#   debug_level             Logging verbosity 0-3 (default: 1)
