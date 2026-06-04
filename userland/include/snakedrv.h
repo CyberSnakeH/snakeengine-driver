@@ -25,8 +25,8 @@
 
 #define SNAKEDRV_VERSION_MAJOR      2
 #define SNAKEDRV_VERSION_MINOR      0
-#define SNAKEDRV_VERSION_PATCH      1
-#define SNAKEDRV_VERSION_STRING     "2.0.1"
+#define SNAKEDRV_VERSION_PATCH      2
+#define SNAKEDRV_VERSION_STRING     "2.0.2"
 
 /*
  * Wire-compatibility ABI version.

@@ -113,7 +113,7 @@ jobs:
         run: |
           set -euo pipefail
           for f in snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64; do
-            cosign sign-blob --bundle "${f}.sigstore" "$f"
+            cosign sign-blob --new-bundle-format --bundle "${f}.sigstore" "$f"
           done
           sha256sum snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64 \
             | LC_ALL=C sort > SHA256SUMS

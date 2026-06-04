@@ -14,7 +14,7 @@
 # Removal:
 #   sudo semodule -r snakeengine
 
-policy_module(snakeengine, 2.0.1)
+policy_module(snakeengine, 2.0.2)
 
 ########################################
 # Type definitions
