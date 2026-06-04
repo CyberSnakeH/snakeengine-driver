@@ -177,6 +177,84 @@ sign-module.sh   Secure Boot module signing (MOK)
 
 ## Changelog
 
+### 2.0.2 (2026-06-04)
+
+**Driver update and source-install pipeline:**
+- Added a production source-release flow for `snakedrv-updater`: GitHub
+  tags now publish `snakeengine-driver-X.Y.Z.tar.gz` plus a matching
+  `.sigstore` bundle, checksum files, and a standalone `sigstore-verify`
+  binary.
+- Switched release signing to cosign's protobuf bundle format
+  (`--new-bundle-format`) so the bundled `sigstore-verify` can parse and
+  verify release signatures.
+- Hardened `snakedrv-updater` into a fail-closed updater:
+  network timeouts, bounded Sigstore verification, fatal `modprobe`
+  failures, loaded-module verification, ABI verification, `/dev/snakedrv`
+  verification, and clear error messages.
+- Fixed update ordering: the kernel module is now built, installed,
+  loaded, and validated before replacing `libsnakedrv.so` and headers,
+  preventing mixed `libsnakedrv`/`snakedrv.ko` ABI states.
+- DKMS updates now remove stale `snakedrv` versions and `/usr/src`
+  trees before registering the new version, avoiding stale source trees
+  breaking later updates.
+- Added the source-install templates required by updater/deploy installs:
+  `packaging/dkms/dkms.conf.in`, `packaging/pkgconfig/snakedrv.pc.in`,
+  and `packaging/cmake/SnakeDrvConfigVersion.cmake.in`.
+- Added a package-free release workflow: no `nfpm`, no `.deb`, no `.rpm`;
+  releases publish only the signed source tarball and verifier assets.
+
+**Install and deployment tooling:**
+- `deploy.sh install` now installs the updater and verifier under
+  `/usr/lib/snakeengine/`.
+- `deploy.sh status` reports update-tool installation state, loaded
+  driver version/ABI, DKMS state, device state, and recent kernel logs.
+- `deploy.sh load` now treats an already-loaded module as a state to
+  validate instead of blindly running `insmod` and failing with
+  `File exists`.
+- `deploy.sh build/install` no longer requires the local `tests/` or
+  `tests/payload_imgui/` directories. They are optional developer
+  assets; production source installs build the driver, userland library,
+  and verifier without them.
+- Fixed the advertised `deploy.sh build-kernel` command so it is accepted
+  by the command parser and can be used for VM/kernel-only validation.
+- `deploy.sh` now builds `tools/sigstore-verify` with
+  `-buildvcs=false`, making Go builds deterministic in source archives
+  and temporary worktrees without reliable Git metadata.
+- The udev rule is now installed as a minimal root-owned `0644` rule for
+  `/dev/snakedrv` with group `snakeengine`.
+
+**Kernel driver ABI and runtime validation:**
+- Introduced `SNAKEDRV_ABI_VERSION` and exposed the loaded ABI through
+  driver info/module parameters so userland can reject unsupported
+  kernels instead of failing later with mismatched IOCTL layouts.
+- Added runtime scanner ABI coverage for backend selection, scan options,
+  first scan, next scan, result-set info, result retrieval, perf stats,
+  reset, free, and detach paths.
+- Fixed the scanner IOCTL header duplication issue by consolidating
+  `SNAKEDRV_IOCTL_MAGIC` usage between core and scanner headers.
+- Added safer kernel scanner/result-set plumbing and ABI checks for the
+  process backend.
+
+**Kernel safety fixes:**
+- Fixed the `injector_shadow_alloc` error path so partially created
+  shadow mappings are unmapped if later allocation steps fail.
+- Added validation for breakpoint target addresses before programming
+  hardware breakpoints, avoiding arbitrary kernel-address breakpoints.
+- Kept VMA stealth explicit and bounded; deferred VMA hiding remains
+  disabled unless the target mapping can be handled safely.
+
+**Userland library and manual mapping:**
+- Hardened ELF symbol and relocation parsing in
+  `userland/src/snakedrv_injector.cpp` with stricter bounds checks.
+- Added local selftests for IOCTL ABI validation and manual-map ELF entry
+  discovery.
+- `manualMapLibrary()` now has a concrete test path using a payload that
+  exports `ManualMapEntry`.
+- Added installable pkg-config and CMake metadata for downstream driver
+  consumers, with ABI checks in the generated CMake config.
+- Installed headers now live under `include/snakedrv/`, matching the
+  installed library and generated metadata.
+
 ### 2.0.1 (2026-04-10)
 
 **Cross-distro kernel build fixes (tested on Ubuntu 24.04 / kernel
