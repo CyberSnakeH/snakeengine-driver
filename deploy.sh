@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# SnakeEngine Driver - Professional Deployment Script v2.0.0
+# SnakeEngine Driver - Professional Deployment Script v2.0.1
 #
 # This script handles:
 # - Dependency checking and installation
@@ -54,7 +54,7 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="snakeengine"
 MODULE_NAME="snakedrv"
-VERSION="2.0.0"
+VERSION="2.0.1"
 
 # Installation paths
 PREFIX="${PREFIX:-/usr/local}"
@@ -1168,7 +1168,7 @@ while [[ $# -gt 0 ]]; do
             [ -n "${INJECT_PID}" ] && shift
             [ -n "${INJECT_SO}" ] && shift
             ;;
-        deps|build|install|uninstall|load|unload|reload|status|clean|test|payload|help)
+        deps|build|build-kernel|install|uninstall|load|unload|reload|status|clean|test|payload|help)
             COMMAND="$1"
             shift
             ;;
