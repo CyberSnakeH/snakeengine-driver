@@ -16,8 +16,15 @@ parser.add_argument("--kernel", help="Boot image matching --kdir")
 parser.add_argument("--output", help="Directory for build artifacts and serial log")
 args = parser.parse_args()
 kdir = Path(args.kdir).resolve()
-kernel = Path(args.kernel or f"/boot/vmlinuz-{kdir.name}")
-if not (kdir / "Makefile").is_file() or not kernel.is_file():
+release_header = kdir / "include/generated/utsrelease.h"
+if not (kdir / "Makefile").is_file() or not release_header.is_file():
+    parser.error("prepared kernel development headers are required")
+release_match = re.search(r'^#define UTS_RELEASE "([^"]+)"',
+                          release_header.read_text(), re.MULTILINE)
+if not release_match:
+    parser.error("kernel headers do not define UTS_RELEASE")
+kernel = Path(args.kernel or f"/boot/vmlinuz-{release_match.group(1)}")
+if not kernel.is_file():
     parser.error("matching kernel image and development headers are required")
 out = Path(args.output or tempfile.mkdtemp(prefix="snakedrv-runtime-"))
 out.mkdir(parents=True, exist_ok=True)

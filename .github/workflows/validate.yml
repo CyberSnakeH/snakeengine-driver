@@ -51,7 +51,8 @@ jobs:
         run: |
           set -euo pipefail
           kdir="$(find /usr/src -maxdepth 1 -type d -name '*-generic' | sort -V | tail -n1)"
-          release="$(make -s -C "$kdir" kernelrelease)"
+          release="$(awk -F '\"' '/^#define UTS_RELEASE / {print $2}' "$kdir/include/generated/utsrelease.h")"
+          test -n "$release"
           sudo install -m 0644 "/boot/vmlinuz-$release" "$RUNNER_TEMP/snakedrv-vmlinuz"
           python3 scripts/test-kernel-runtime.py --kdir "$kdir" \
               --kernel "$RUNNER_TEMP/snakedrv-vmlinuz" --output "$RUNNER_TEMP/snakedrv-runtime"
