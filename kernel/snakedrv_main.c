@@ -1308,6 +1308,35 @@ static void fill_scanner_perf_stats(struct snake_perf_stats *out)
  * IOCTL Handler
  * ============================================================================ */
 
+/* Keep the large register payload out of the main ioctl stack frame. */
+static noinline long snakedrv_regs_ioctl(unsigned int cmd, void __user *uarg)
+{
+    struct snake_regs_op op;
+    struct attached_proc *p;
+    int ret;
+
+    if (copy_from_user(&op, uarg, sizeof(op)))
+        return -EFAULT;
+
+    p = get_proc(op.pid);
+    if (!p) {
+        op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
+        if (copy_to_user(uarg, &op, sizeof(op)))
+            return -EFAULT;
+        return -ESRCH;
+    }
+
+    if (cmd == SNAKE_IOCTL_GET_REGS)
+        ret = do_get_regs(p, &op.regs, op.tid);
+    else
+        ret = do_set_regs(p, &op.regs, op.tid);
+    op.result = ret ? ret : SNAKEDRV_SUCCESS;
+    if (copy_to_user(uarg, &op, sizeof(op)))
+        ret = -EFAULT;
+    put_proc(p);
+    return ret;
+}
+
 static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
     void __user *uarg = (void __user *)arg;
@@ -1740,51 +1769,9 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         break;
     }
 
-    case SNAKE_IOCTL_GET_REGS: {
-        struct snake_regs_op op;
-        struct attached_proc *p;
-
-        if (copy_from_user(&op, uarg, sizeof(op)))
-            return -EFAULT;
-
-        p = get_proc(op.pid);
-        if (!p) {
-            op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
-            if (copy_to_user(uarg, &op, sizeof(op)))
-                return -EFAULT;
-            return -ESRCH;
-        }
-
-        ret = do_get_regs(p, &op.regs, op.tid);
-        op.result = ret ? ret : SNAKEDRV_SUCCESS;
-        if (copy_to_user(uarg, &op, sizeof(op)))
-            ret = -EFAULT;
-        put_proc(p);
-        break;
-    }
-
-    case SNAKE_IOCTL_SET_REGS: {
-        struct snake_regs_op op;
-        struct attached_proc *p;
-
-        if (copy_from_user(&op, uarg, sizeof(op)))
-            return -EFAULT;
-
-        p = get_proc(op.pid);
-        if (!p) {
-            op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
-            if (copy_to_user(uarg, &op, sizeof(op)))
-                return -EFAULT;
-            return -ESRCH;
-        }
-
-        ret = do_set_regs(p, &op.regs, op.tid);
-        op.result = ret ? ret : SNAKEDRV_SUCCESS;
-        if (copy_to_user(uarg, &op, sizeof(op)))
-            ret = -EFAULT;
-        put_proc(p);
-        break;
-    }
+    case SNAKE_IOCTL_GET_REGS:
+    case SNAKE_IOCTL_SET_REGS:
+        return snakedrv_regs_ioctl(cmd, uarg);
     
     case SNAKE_IOCTL_CLEAR_BREAKPOINT: {
         struct snake_hw_breakpoint bp;

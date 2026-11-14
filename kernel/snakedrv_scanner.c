@@ -19,7 +19,7 @@
 #include <linux/workqueue.h>
 #include <linux/completion.h>
 #include <linux/cpumask.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 12, 0)
 #include <linux/unaligned.h>
 #else
 #include <asm/unaligned.h>
