@@ -41,12 +41,13 @@ SNAKEDRV_VERSION_PATCH := $(shell awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV
 SNAKEDRV_ABI_VERSION   := $(shell awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_ABI_VERSION/{print $$3}' $(HEADER_FILE))
 SNAKEDRV_VERSION       := $(SNAKEDRV_VERSION_MAJOR).$(SNAKEDRV_VERSION_MINOR).$(SNAKEDRV_VERSION_PATCH)
 
-SRCS := src/libsnakedrv.cpp src/libsnakedrv_scanner.cpp src/snakedrv_injector.cpp
+SRCS := src/libsnakedrv.cpp src/libsnakedrv_scanner.cpp src/snakedrv_injector.cpp src/snakedrv_protect.cpp
 OBJS := $(patsubst src/%.cpp,$(BUILD_DIR)/%.o,$(SRCS))
 TARGET := libsnakedrv.so
 MANUALMAP_PAYLOAD := $(BUILD_DIR)/manual_map_payload.so
 MANUALMAP_ELF_TEST := $(BUILD_DIR)/test_manualmap_elf
 IOCTL_ABI_TEST := $(BUILD_DIR)/test_ioctl_abi
+PROTECTION_TEST := $(BUILD_DIR)/test_protection
 
 # Headers shipped to consumers (everything under include/).
 PUBLIC_HEADERS := $(wildcard include/*.h) $(wildcard include/*.hpp)
@@ -59,7 +60,7 @@ D_CMAKEDIR   := $(DESTDIR)$(CMAKEDIR)
 
 INSTALL ?= install
 
-.PHONY: all clean install test test-manualmap test-ioctl-abi \
+.PHONY: all clean install test test-manualmap test-ioctl-abi test-protection \
         install-lib install-headers install-pkgconfig install-cmake \
         print-version
 
@@ -94,7 +95,14 @@ $(IOCTL_ABI_TEST): selftests/test_ioctl_abi.cpp
 	@echo "  CXX   $@"
 	@$(CXX) $(CXXFLAGS) $(INCLUDES) $< -o $@
 
-test: test-manualmap test-ioctl-abi
+$(PROTECTION_TEST): selftests/test_protection.cpp src/snakedrv_protect.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(INCLUDES) $^ -o $@
+
+test: test-manualmap test-ioctl-abi test-protection
+
+test-protection: $(PROTECTION_TEST)
+	@$(PROTECTION_TEST)
 
 test-manualmap: $(MANUALMAP_PAYLOAD) $(MANUALMAP_ELF_TEST)
 	@$(MANUALMAP_ELF_TEST) $(MANUALMAP_PAYLOAD)

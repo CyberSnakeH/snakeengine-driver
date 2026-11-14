@@ -6,6 +6,7 @@
  */
 
 #include "libsnakedrv.hpp"
+#include "snakedrv_protect.hpp"
 
 #include <fcntl.h>
 #include <unistd.h>
@@ -224,8 +225,16 @@ Driver& Driver::operator=(Driver&& other) noexcept = default;
 bool Driver::open() {
     if (impl_->fd >= 0) return true;
     
-    impl_->fd = ::open(SNAKEDRV_DEVICE_PATH, O_RDWR);
+    impl_->fd = ::open(SNAKEDRV_DEVICE_PATH, O_RDWR | O_CLOEXEC);
     if (impl_->fd < 0) {
+        return false;
+    }
+    snake_driver_info info{};
+    if (ioctl(impl_->fd, SNAKE_IOCTL_GET_INFO, &info) < 0 ||
+        info.abi_version != SNAKEDRV_ABI_VERSION) {
+        ::close(impl_->fd);
+        impl_->fd = -1;
+        errno = EPROTONOSUPPORT;
         return false;
     }
     return true;
@@ -556,6 +565,18 @@ std::optional<MemoryRegion> Driver::findRegion(Address address) {
 std::optional<Breakpoint> Driver::setBreakpoint(Address address,
                                                 BreakpointType type,
                                                 BreakpointLength length) {
+    return setBreakpoint(address, type, length, 0, false);
+}
+
+std::optional<snake_debug_stats> Driver::debugStats() const {
+    snake_debug_stats stats{};
+    if (!isOpen() || ioctl(impl_->fd, SNAKE_IOCTL_GET_DEBUG_STATS, &stats) < 0)
+        return std::nullopt;
+    return stats;
+}
+
+std::optional<Breakpoint> Driver::setBreakpoint(Address address, BreakpointType type,
+    BreakpointLength length, ThreadId tid, bool stopOnHit) {
     if (!isAttached()) {
         throw NotAttachedException();
     }
@@ -565,7 +586,8 @@ std::optional<Breakpoint> Driver::setBreakpoint(Address address,
     kbp.address = address;
     kbp.type = static_cast<uint32_t>(type);
     kbp.length = static_cast<uint32_t>(length);
-    kbp.enabled = 1;
+    kbp.tid = tid;
+    kbp.enabled = SNAKE_BP_FLAG_ENABLED | (stopOnHit ? SNAKE_BP_FLAG_STOP_ON_HIT : 0);
     
     if (ioctl(impl_->fd, SNAKE_IOCTL_SET_BREAKPOINT, &kbp) < 0) {
         return std::nullopt;
@@ -813,7 +835,13 @@ Driver::InjectionResult Driver::injectProtect(ProcessId pid, Address address, si
     protect.protection = static_cast<uint32_t>(prot);
 
     if (ioctl(impl_->fd, SNAKE_IOCTL_INJECT_PROTECT, &protect) < 0) {
-        result.errorCode = errno;
+        result.errorCode = errno == EOPNOTSUPP ?
+            detail::protectProcess(pid, address, size, static_cast<unsigned>(prot)) : errno;
+        if (!result.errorCode) {
+            result.success = true;
+            result.address = address;
+            return result;
+        }
         result.errorMsg = "IOCTL failed: " + std::string(strerror(errno));
         return result;
     }

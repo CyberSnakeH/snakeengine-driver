@@ -26,6 +26,40 @@ jobs:
           done
           for hook in packaging/nfpm/*.sh; do sh -n "$hook"; done
           bash scripts/test-installation.sh
+      - name: Build and run SDK regression tests
+        run: |
+          cmake -S userland -B /tmp/snakedrv-sdk-tests -DSNAKEDRV_BUILD_TESTS=ON
+          cmake --build /tmp/snakedrv-sdk-tests -j2
+          ctest --test-dir /tmp/snakedrv-sdk-tests --output-on-failure
+
+  runtime:
+    name: Isolated kernel runtime tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Install matching boot image, headers and QEMU
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              linux-image-generic linux-headers-generic build-essential cmake \
+              qemu-system-x86 cpio libelf-dev
+      - name: Exercise the module in a diskless guest
+        shell: bash
+        run: |
+          set -euo pipefail
+          kdir="$(find /usr/src -maxdepth 1 -type d -name '*-generic' | sort -V | tail -n1)"
+          release="$(make -s -C "$kdir" kernelrelease)"
+          sudo install -m 0644 "/boot/vmlinuz-$release" "$RUNNER_TEMP/snakedrv-vmlinuz"
+          python3 scripts/test-kernel-runtime.py --kdir "$kdir" \
+              --kernel "$RUNNER_TEMP/snakedrv-vmlinuz" --output "$RUNNER_TEMP/snakedrv-runtime"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: kernel-runtime-logs
+          path: ${{ runner.temp }}/snakedrv-runtime/serial.log
 
   kernel:
     name: DKMS sources (${{ matrix.image }})

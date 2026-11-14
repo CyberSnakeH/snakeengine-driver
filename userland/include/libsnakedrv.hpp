@@ -690,6 +690,9 @@ public:
     std::optional<Breakpoint> setBreakpoint(Address address, 
                                             BreakpointType type = BreakpointType::Execute,
                                             BreakpointLength length = BreakpointLength::Byte1);
+    std::optional<Breakpoint> setBreakpoint(Address address, BreakpointType type,
+        BreakpointLength length, ThreadId tid, bool stopOnHit);
+    std::optional<snake_debug_stats> debugStats() const;
     /**
      * clearBreakpoint - Clear a breakpoint by handle
      * @bp: Breakpoint handle

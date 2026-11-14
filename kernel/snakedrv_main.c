@@ -45,6 +45,8 @@
 #include <linux/capability.h>
 #include <linux/security.h>
 #include <linux/overflow.h>
+#include <linux/refcount.h>
+#include <linux/irq_work.h>
 #include <asm/processor.h>
 
 /* Include shared headers with userland */
@@ -149,12 +151,15 @@ static DEFINE_MUTEX(attach_mutex);
 static LIST_HEAD(attached_list);
 static atomic_t attached_count = ATOMIC_INIT(0);
 
-/* Debug events */
-static DEFINE_SPINLOCK(event_lock);
-static LIST_HEAD(event_list);
-static DECLARE_WAIT_QUEUE_HEAD(event_waitq);
-static atomic_t event_count = ATOMIC_INIT(0);
-static uint32_t event_sequence;
+/* Each open file owns a bounded, preallocated event ring. */
+struct snakedrv_session {
+    raw_spinlock_t event_lock;
+    wait_queue_head_t event_waitq;
+    struct snake_debug_event *events;
+    unsigned int capacity, head, tail, count;
+    u32 sequence;
+    atomic64_t dropped, contention;
+};
 
 /* ============================================================================
  * Data Structures
@@ -169,31 +174,38 @@ struct bp_slot {
     pid_t tid;
     bool enabled;
     struct list_head perf_events;
+    u32 flags;
 };
 
 struct bp_perf_event {
     struct list_head list;
     struct perf_event *perf_bp;
     pid_t tid;
+    struct snakedrv_session *session;
+    struct pid *tgid;
+    struct irq_work notify;
+    u64 address;
+    u32 id, slot, type, length;
+    bool stop_on_hit;
+    struct attached_proc *process;
 };
 
 struct attached_proc {
     struct list_head list;
     pid_t pid;
     struct file *owner;
+    struct pid *pid_handle;
+    atomic_t stopped_by_driver;
 
     /* Unified backend abstraction */
     struct memory_backend *backend;
 
     struct bp_slot bp_slots[HBP_NUM];
-    atomic_t refcount;
-    uint64_t read_ops;
-    uint64_t write_ops;
-};
-
-struct event_entry {
-    struct list_head list;
-    struct snake_debug_event event;
+    refcount_t refcount;
+    struct mutex bp_mutex;
+    bool detached;
+    atomic64_t read_ops;
+    atomic64_t write_ops;
 };
 
 /* Forward declaration — used by put_proc before definition */
@@ -213,13 +225,15 @@ static struct attached_proc *find_proc_locked(pid_t pid)
     return NULL;
 }
 
-static struct attached_proc *get_proc(pid_t pid)
+static struct attached_proc *get_proc(struct file *file, pid_t pid)
 {
     struct attached_proc *p;
     mutex_lock(&attach_mutex);
     p = find_proc_locked(pid);
-    if (p)
-        atomic_inc(&p->refcount);
+    if (p && p->owner == file && !p->detached)
+        refcount_inc(&p->refcount);
+    else
+        p = NULL;
     mutex_unlock(&attach_mutex);
     return p;
 }
@@ -229,18 +243,11 @@ static void put_proc(struct attached_proc *p)
     if (!p)
         return;
 
-    if (atomic_dec_and_test(&p->refcount)) {
+    if (refcount_dec_and_test(&p->refcount)) {
         cleanup_breakpoints(p);
-        /*
-         * Do NOT call injector_shadow_cleanup_pid here.
-         * Shadow memory must persist after detach — injected code
-         * is still running in it.  Cleanup happens only on:
-         *   - Explicit SHADOW_FREE ioctl
-         *   - Module unload (injector_shadow_cleanup_all)
-         *   - Target process exit (pages released by mm teardown)
-         */
         if (p->backend)
             backend_put(p->backend);
+        put_pid(p->pid_handle);
         kfree(p);
     }
 }
@@ -253,6 +260,9 @@ static void clear_bp_slot(struct bp_slot *slot)
         list_del(&bpe->list);
         if (bpe->perf_bp)
             unregister_hw_breakpoint(bpe->perf_bp);
+        /* perf releases inherited events before the callback context dies. */
+        irq_work_sync(&bpe->notify);
+        put_pid(bpe->tgid);
         kfree(bpe);
     }
 
@@ -269,11 +279,14 @@ static void cleanup_breakpoints(struct attached_proc *p)
 {
     int i;
     
+    mutex_lock(&p->bp_mutex);
     for (i = 0; i < HBP_NUM; i++) {
-        if (!p->bp_slots[i].used)
-            continue;
-        clear_bp_slot(&p->bp_slots[i]);
+        if (p->bp_slots[i].used)
+            clear_bp_slot(&p->bp_slots[i]);
     }
+    mutex_unlock(&p->bp_mutex);
+    if (atomic_xchg(&p->stopped_by_driver, 0))
+        kill_pid(p->pid_handle, SIGCONT, 1);
 }
 
 /* ============================================================================
@@ -291,7 +304,7 @@ static ssize_t do_read_memory(struct attached_proc *p, uint64_t addr,
     ret = backend_read(p->backend, addr, buf, len);
 
     if (ret > 0)
-        p->read_ops++;
+        atomic64_inc(&p->read_ops);
 
     return ret;
 }
@@ -307,7 +320,7 @@ static ssize_t do_write_memory(struct attached_proc *p, uint64_t addr,
     ret = backend_write(p->backend, addr, buf, len);
 
     if (ret > 0)
-        p->write_ops++;
+        atomic64_inc(&p->write_ops);
 
     return ret;
 }
@@ -853,6 +866,23 @@ static int process_signal_op(pid_t pid, int sig)
     return ret;
 }
 
+static int process_resume(struct file *file, pid_t pid)
+{
+    struct attached_proc *p = get_proc(file, pid);
+    int ret, owned_stop;
+
+    if (!p)
+        return process_signal_op(pid, SIGCONT);
+
+    /* Clear before signaling: a new breakpoint stop must not be erased. */
+    owned_stop = atomic_xchg(&p->stopped_by_driver, 0);
+    ret = kill_pid(p->pid_handle, SIGCONT, 1);
+    if (ret && owned_stop)
+        atomic_cmpxchg(&p->stopped_by_driver, 0, 1);
+    put_proc(p);
+    return ret;
+}
+
 static int do_single_step(struct attached_proc *p, pid_t tid)
 {
 #ifdef TIF_SINGLESTEP
@@ -875,122 +905,66 @@ static int do_single_step(struct attached_proc *p, pid_t tid)
  * Hardware Breakpoint Support
  * ============================================================================ */
 
-static void read_xmm_regs(struct snake_xmm_reg *out)
+/* Signals and waiter wakeups run after the debug/NMI callback returns. */
+static void bp_notify(struct irq_work *work)
 {
-    /* Use movdqu to avoid alignment issues if struct is packed/unaligned */
-    asm volatile(
-        "movdqu %%xmm0, 0x00(%0)\n"
-        "movdqu %%xmm1, 0x10(%0)\n"
-        "movdqu %%xmm2, 0x20(%0)\n"
-        "movdqu %%xmm3, 0x30(%0)\n"
-        "movdqu %%xmm4, 0x40(%0)\n"
-        "movdqu %%xmm5, 0x50(%0)\n"
-        "movdqu %%xmm6, 0x60(%0)\n"
-        "movdqu %%xmm7, 0x70(%0)\n"
-        "movdqu %%xmm8, 0x80(%0)\n"
-        "movdqu %%xmm9, 0x90(%0)\n"
-        "movdqu %%xmm10, 0xA0(%0)\n"
-        "movdqu %%xmm11, 0xB0(%0)\n"
-        "movdqu %%xmm12, 0xC0(%0)\n"
-        "movdqu %%xmm13, 0xD0(%0)\n"
-        "movdqu %%xmm14, 0xE0(%0)\n"
-        "movdqu %%xmm15, 0xF0(%0)\n"
-        : /* no output operands directly, memory is modified via pointer */
-        : "r" (out)
-        : "memory"
-    );
+    struct bp_perf_event *bpe = container_of(work, struct bp_perf_event, notify);
+    if (bpe->stop_on_hit && !kill_pid(bpe->tgid, SIGSTOP, 1))
+        atomic_set(&bpe->process->stopped_by_driver, 1);
+    wake_up_interruptible(&bpe->session->event_waitq);
 }
 
 static void bp_handler(struct perf_event *bp,
-                      struct perf_sample_data *data,
-                      struct pt_regs *regs)
+                       struct perf_sample_data *data, struct pt_regs *regs)
 {
-    struct event_entry *entry;
-    struct attached_proc *p;
+    struct bp_perf_event *bpe = bp->overflow_handler_context;
+    struct snakedrv_session *s = bpe->session;
+    struct snake_debug_event *e;
     unsigned long flags;
-    pid_t pid = current->tgid;
-    int slot = -1;
-    
-    p = get_proc(pid);
-    if (!p)
-        return;
 
-    if (atomic_read(&event_count) >= param_event_queue_size) {
-        put_proc(p);
-        return;
+    /* Never allocate, sleep, walk mutable lists or wait for an interrupted lock. */
+    if (!raw_spin_trylock_irqsave(&s->event_lock, flags)) {
+        atomic64_inc(&s->contention);
+        atomic64_inc(&s->dropped);
+        goto notify;
     }
-    
-    entry = kzalloc(sizeof(*entry), GFP_ATOMIC);
-    if (!entry) {
-        put_proc(p);
-        return;
+    if (s->count == s->capacity) {
+        atomic64_inc(&s->dropped);
+        raw_spin_unlock_irqrestore(&s->event_lock, flags);
+        goto notify;
     }
-
-    for (slot = 0; slot < HBP_NUM; slot++) {
-        struct bp_perf_event *bpe;
-
-        if (!p->bp_slots[slot].used)
-            continue;
-
-        list_for_each_entry(bpe, &p->bp_slots[slot].perf_events, list) {
-            if (bpe->perf_bp == bp)
-                goto slot_found;
-        }
-    }
-slot_found:
-    if (slot >= HBP_NUM)
-        slot = -1;
-    
-    entry->event.type = (slot >= 0 &&
-                         p->bp_slots[slot].type != SNAKE_BP_TYPE_EXEC)
-        ? SNAKE_DBG_EVENT_WATCHPOINT
-        : SNAKE_DBG_EVENT_BREAKPOINT;
-    entry->event.pid = pid;
-    entry->event.tid = current->pid;
-    entry->event.address = regs->ip;
-    entry->event.accessed_address = (slot >= 0) ? p->bp_slots[slot].address : 0;
-    entry->event.timestamp = ktime_get_ns();
-    entry->event.bp_slot = (slot >= 0) ? slot : 0;
-    entry->event.bp_id = (slot >= 0) ? p->bp_slots[slot].id : 0;
-    entry->event.access_size = (slot >= 0) ? p->bp_slots[slot].length : 0;
-    entry->event.access_type = (slot >= 0) ? p->bp_slots[slot].type : 0;
-    
-    /* Copy registers */
-    entry->event.regs.rax = regs->ax;
-    entry->event.regs.rbx = regs->bx;
-    entry->event.regs.rcx = regs->cx;
-    entry->event.regs.rdx = regs->dx;
-    entry->event.regs.rsi = regs->si;
-    entry->event.regs.rdi = regs->di;
-    entry->event.regs.rbp = regs->bp;
-    entry->event.regs.rsp = regs->sp;
-    entry->event.regs.rip = regs->ip;
-    entry->event.regs.rflags = regs->flags;
+    e = &s->events[s->head];
+    memset(e, 0, sizeof(*e));
+    e->type = bpe->type == SNAKE_BP_TYPE_EXEC ?
+        SNAKE_DBG_EVENT_BREAKPOINT : SNAKE_DBG_EVENT_WATCHPOINT;
+    e->pid = current->tgid;
+    e->tid = current->pid;
+    e->address = regs->ip;
+    e->accessed_address = bpe->address;
+    e->timestamp = ktime_get_ns();
+    e->bp_slot = bpe->slot;
+    e->bp_id = bpe->id;
+    e->access_size = bpe->length;
+    e->access_type = bpe->type;
+    e->sequence = s->sequence++;
+    e->regs.rax = regs->ax; e->regs.rbx = regs->bx;
+    e->regs.rcx = regs->cx; e->regs.rdx = regs->dx;
+    e->regs.rsi = regs->si; e->regs.rdi = regs->di;
+    e->regs.rbp = regs->bp; e->regs.rsp = regs->sp;
+    e->regs.rip = regs->ip; e->regs.rflags = regs->flags;
 #ifdef CONFIG_X86_64
-    entry->event.regs.r8 = regs->r8;
-    entry->event.regs.r9 = regs->r9;
-    entry->event.regs.r10 = regs->r10;
-    entry->event.regs.r11 = regs->r11;
-    entry->event.regs.r12 = regs->r12;
-    entry->event.regs.r13 = regs->r13;
-    entry->event.regs.r14 = regs->r14;
-    entry->event.regs.r15 = regs->r15;
+    e->regs.r8 = regs->r8; e->regs.r9 = regs->r9;
+    e->regs.r10 = regs->r10; e->regs.r11 = regs->r11;
+    e->regs.r12 = regs->r12; e->regs.r13 = regs->r13;
+    e->regs.r14 = regs->r14; e->regs.r15 = regs->r15;
 #endif
-    
-    /* Capture XMM registers directly from hardware */
-    read_xmm_regs(entry->event.regs.xmm);
-    
-    spin_lock_irqsave(&event_lock, flags);
-    entry->event.sequence = event_sequence++;
-    list_add_tail(&entry->list, &event_list);
-    atomic_inc(&event_count);
-    spin_unlock_irqrestore(&event_lock, flags);
-    
-    wake_up_interruptible(&event_waitq);
-    put_proc(p);
+    /* FPU state is not safe to sample with ad-hoc SIMD instructions here. */
+    s->head = (s->head + 1) % s->capacity;
+    s->count++;
+    raw_spin_unlock_irqrestore(&s->event_lock, flags);
+notify:
+    irq_work_queue(&bpe->notify);
 }
-
-
 
 static int validate_breakpoint_address(struct task_struct *target,
                                        struct snake_hw_breakpoint *bp,
@@ -1033,10 +1007,11 @@ static int validate_breakpoint_address(struct task_struct *target,
     return ret;
 }
 
-static int register_bp_for_task(struct bp_slot *slot,
+static int register_bp_for_task(struct attached_proc *p, unsigned int index,
                                 struct perf_event_attr *attr,
                                 struct task_struct *target)
 {
+    struct bp_slot *slot = &p->bp_slots[index];
     struct bp_perf_event *bpe;
     struct perf_event *perf_bp;
     int ret;
@@ -1045,9 +1020,18 @@ static int register_bp_for_task(struct bp_slot *slot,
     if (!bpe)
         return -ENOMEM;
 
-    perf_bp = register_user_hw_breakpoint(attr, bp_handler, NULL, target);
+    bpe->session = p->owner->private_data;
+    bpe->process = p;
+    bpe->tgid = get_pid(p->pid_handle);
+    bpe->address = slot->address;
+    bpe->id = slot->id; bpe->slot = index;
+    bpe->type = slot->type; bpe->length = slot->length;
+    bpe->stop_on_hit = !!(slot->flags & SNAKE_BP_FLAG_STOP_ON_HIT);
+    init_irq_work(&bpe->notify, bp_notify);
+    perf_bp = register_user_hw_breakpoint(attr, bp_handler, bpe, target);
     if (IS_ERR(perf_bp)) {
         ret = PTR_ERR(perf_bp);
+        put_pid(bpe->tgid);
         kfree(bpe);
         return ret;
     }
@@ -1058,7 +1042,7 @@ static int register_bp_for_task(struct bp_slot *slot,
     return 0;
 }
 
-static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
+static int __do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
 {
     struct perf_event_attr attr;
     struct task_struct *target;
@@ -1126,7 +1110,8 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
         return -EINVAL;
     }
 
-    if (!bp->enabled) {
+    if (!(bp->enabled & SNAKE_BP_FLAG_ENABLED) ||
+        (bp->enabled & ~(SNAKE_BP_FLAG_ENABLED | SNAKE_BP_FLAG_STOP_ON_HIT))) {
         bp->result = SNAKEDRV_ERROR_INVALID_ARGS;
         return -EINVAL;
     }
@@ -1147,6 +1132,12 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
     attr.bp_addr = bp->address;
     attr.bp_len = bp_len;
     attr.bp_type = bp_type;
+    attr.exclude_kernel = 1;
+    attr.exclude_hv = 1;
+    /* The perf core propagates callbacks/context to new threads and reaps them. */
+    attr.inherit = !bp->tid;
+    attr.inherit_thread = !bp->tid;
+    attr.remove_on_exec = 1;
 
     p->bp_slots[slot].used = true;
     p->bp_slots[slot].id = slot + (p->pid << 8);
@@ -1155,9 +1146,10 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
     p->bp_slots[slot].length = bp_len_bytes;
     p->bp_slots[slot].tid = bp->tid;
     p->bp_slots[slot].enabled = true;
+    p->bp_slots[slot].flags = bp->enabled;
 
     if (bp->tid) {
-        ret = register_bp_for_task(&p->bp_slots[slot], &attr, target);
+        ret = register_bp_for_task(p, slot, &attr, target);
         put_task_struct(target);
         if (ret) {
             bp->result = ret;
@@ -1178,7 +1170,7 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
         }
 
         for (i = 0; i < task_count; i++) {
-            ret = register_bp_for_task(&p->bp_slots[slot], &attr, tasks[i]);
+            ret = register_bp_for_task(p, slot, &attr, tasks[i]);
             if (ret) {
                 bp->result = ret;
                 clear_bp_slot(&p->bp_slots[slot]);
@@ -1209,7 +1201,7 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
 
 
 
-static int do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
+static int __do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
 
 {
 
@@ -1231,6 +1223,24 @@ static int do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoi
 
     return 0;
 
+}
+
+static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
+{
+    int ret;
+    mutex_lock(&p->bp_mutex);
+    ret = READ_ONCE(p->detached) ? -ENODEV : __do_set_breakpoint(p, bp);
+    mutex_unlock(&p->bp_mutex);
+    return ret;
+}
+
+static int do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
+{
+    int ret;
+    mutex_lock(&p->bp_mutex);
+    ret = READ_ONCE(p->detached) ? -ENODEV : __do_clear_breakpoint(p, bp);
+    mutex_unlock(&p->bp_mutex);
+    return ret;
 }
 
 static void add_perf_counters(struct snake_perf_stats *out,
@@ -1309,7 +1319,7 @@ static void fill_scanner_perf_stats(struct snake_perf_stats *out)
  * ============================================================================ */
 
 /* Keep the large register payload out of the main ioctl stack frame. */
-static noinline long snakedrv_regs_ioctl(unsigned int cmd, void __user *uarg)
+static noinline long snakedrv_regs_ioctl(struct file *file, unsigned int cmd, void __user *uarg)
 {
     struct snake_regs_op op;
     struct attached_proc *p;
@@ -1318,7 +1328,7 @@ static noinline long snakedrv_regs_ioctl(unsigned int cmd, void __user *uarg)
     if (copy_from_user(&op, uarg, sizeof(op)))
         return -EFAULT;
 
-    p = get_proc(op.pid);
+    p = get_proc(file, op.pid);
     if (!p) {
         op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
         if (copy_to_user(uarg, &op, sizeof(op)))
@@ -1443,7 +1453,17 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         p->pid = attach.pid;
         p->backend = backend;
         p->owner = file;
-        atomic_set(&p->refcount, 1);
+        p->pid_handle = get_task_pid(((struct process_context *)backend->private_data)->task,
+                                     PIDTYPE_TGID);
+        if (!p->pid_handle) {
+            kfree(p);
+            backend_put(backend);
+            mutex_unlock(&attach_mutex);
+            return -ESRCH;
+        }
+        atomic_set(&p->stopped_by_driver, 0);
+        refcount_set(&p->refcount, 1);
+        mutex_init(&p->bp_mutex);
         for (int i = 0; i < HBP_NUM; i++)
             INIT_LIST_HEAD(&p->bp_slots[i].perf_events);
 
@@ -1469,9 +1489,12 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (ctrl.operation == SNAKE_DBG_CTRL_DETACH) {
             mutex_lock(&attach_mutex);
             p = find_proc_locked(ctrl.pid);
-            if (p) {
+            if (p && p->owner == file) {
+                WRITE_ONCE(p->detached, true);
                 list_del(&p->list);
                 atomic_dec(&attached_count);
+            } else {
+                p = NULL;
             }
             mutex_unlock(&attach_mutex);
 
@@ -1483,6 +1506,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
                  * If a concurrent ioctl still holds a reference,
                  * the actual free is deferred until that put_proc.
                  */
+                cleanup_breakpoints(p);
                 put_proc(p);
 
                 ctrl.result = SNAKEDRV_SUCCESS;
@@ -1494,7 +1518,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             if (copy_to_user(uarg, &ctrl, sizeof(ctrl)))
                 ret = -EFAULT;
         } else if (ctrl.operation == SNAKE_DBG_CTRL_CONTINUE) {
-            ret = process_signal_op(ctrl.pid, SIGCONT);
+            ret = process_resume(file, ctrl.pid);
             ctrl.result = ret ? ret : SNAKEDRV_SUCCESS;
             if (copy_to_user(uarg, &ctrl, sizeof(ctrl)))
                 ret = -EFAULT;
@@ -1504,7 +1528,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             if (copy_to_user(uarg, &ctrl, sizeof(ctrl)))
                 ret = -EFAULT;
         } else if (ctrl.operation == SNAKE_DBG_CTRL_STEP) {
-            p = get_proc(ctrl.pid);
+            p = get_proc(file, ctrl.pid);
             if (!p) {
                 ctrl.result = SNAKEDRV_ERROR_NOT_ATTACHED;
                 if (copy_to_user(uarg, &ctrl, sizeof(ctrl)))
@@ -1532,7 +1556,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (op.size == 0 || op.size > (1 << 20))
             return -EINVAL;
         
-        p = get_proc(op.pid);
+        p = get_proc(file, op.pid);
         if (!p) {
             op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             if (copy_to_user(uarg, &op, sizeof(op)))
@@ -1551,7 +1575,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
          * shadow allocation, access_process_vm won't work
          * (no VMA).  Fall back to the normal backend path.
          */
-        bytes = injector_shadow_read(op.pid, op.address, kbuf, op.size);
+        bytes = injector_shadow_read(file, op.pid, op.address, kbuf, op.size);
         if (bytes == -ENOENT)
             bytes = do_read_memory(p, op.address, kbuf, op.size);
 
@@ -1583,7 +1607,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (op.size == 0 || op.size > (1 << 20))
             return -EINVAL;
         
-        p = get_proc(op.pid);
+        p = get_proc(file, op.pid);
         if (!p) {
             op.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             if (copy_to_user(uarg, &op, sizeof(op)))
@@ -1692,7 +1716,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (copy_from_user(&vtp, uarg, sizeof(vtp)))
             return -EFAULT;
 
-        p = get_proc(vtp.pid);
+        p = get_proc(file, vtp.pid);
         if (!p) {
             vtp.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             if (copy_to_user(uarg, &vtp, sizeof(vtp)))
@@ -1719,7 +1743,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
             ret = process_signal_op(op.pid, SIGSTOP);
             break;
         case SNAKE_PROC_OP_RESUME:
-            ret = process_signal_op(op.pid, SIGCONT);
+            ret = process_resume(file, op.pid);
             break;
         case SNAKE_PROC_OP_KILL:
             ret = process_signal_op(op.pid, SIGKILL);
@@ -1754,7 +1778,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (copy_from_user(&bp, uarg, sizeof(bp)))
             return -EFAULT;
         
-        p = get_proc(bp.pid);
+        p = get_proc(file, bp.pid);
         if (!p) {
             bp.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             if (copy_to_user(uarg, &bp, sizeof(bp)))
@@ -1771,7 +1795,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
 
     case SNAKE_IOCTL_GET_REGS:
     case SNAKE_IOCTL_SET_REGS:
-        return snakedrv_regs_ioctl(cmd, uarg);
+        return snakedrv_regs_ioctl(file, cmd, uarg);
     
     case SNAKE_IOCTL_CLEAR_BREAKPOINT: {
         struct snake_hw_breakpoint bp;
@@ -1780,7 +1804,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (copy_from_user(&bp, uarg, sizeof(bp)))
             return -EFAULT;
         
-        p = get_proc(bp.pid);
+        p = get_proc(file, bp.pid);
         if (!p) {
             bp.result = SNAKEDRV_ERROR_NOT_ATTACHED;
             if (copy_to_user(uarg, &bp, sizeof(bp)))
@@ -1796,61 +1820,56 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
     }
     
     case SNAKE_IOCTL_POLL_EVENTS: {
+        struct snakedrv_session *s = file->private_data;
         struct snake_event_poll poll;
         struct snake_debug_event *events;
-        struct event_entry *entry, *tmp;
         unsigned long flags;
-        uint32_t copied = 0;
-        
+        u32 copied = 0;
+
         if (copy_from_user(&poll, uarg, sizeof(poll)))
             return -EFAULT;
-        
-        if (poll.max_events == 0 || poll.max_events > 256)
+        if (!poll.max_events || poll.max_events > 256)
             return -EINVAL;
-        
-        events = kvmalloc(sizeof(*events) * poll.max_events, GFP_KERNEL);
+        events = kvmalloc_array(poll.max_events, sizeof(*events), GFP_KERNEL);
         if (!events)
             return -ENOMEM;
-        
-        if (poll.timeout_ms > 0 && atomic_read(&event_count) == 0) {
-            ret = wait_event_interruptible_timeout(event_waitq,
-                atomic_read(&event_count) > 0,
-                msecs_to_jiffies(poll.timeout_ms));
+        if (poll.timeout_ms && !READ_ONCE(s->count)) {
+            ret = wait_event_interruptible_timeout(s->event_waitq,
+                READ_ONCE(s->count), msecs_to_jiffies(poll.timeout_ms));
             if (ret < 0) {
                 kvfree(events);
                 return ret;
             }
         }
-        
-        spin_lock_irqsave(&event_lock, flags);
-        list_for_each_entry_safe(entry, tmp, &event_list, list) {
-            if (copied >= poll.max_events)
-                break;
-            memcpy(&events[copied], &entry->event, sizeof(entry->event));
-            list_del(&entry->list);
-            atomic_dec(&event_count);
-            kfree(entry);
-            copied++;
+        raw_spin_lock_irqsave(&s->event_lock, flags);
+        while (s->count && copied < poll.max_events) {
+            events[copied++] = s->events[s->tail];
+            s->tail = (s->tail + 1) % s->capacity;
+            s->count--;
         }
-        spin_unlock_irqrestore(&event_lock, flags);
-        
-        if (copied > 0) {
-            if (copy_to_user((void __user *)poll.events_buffer, events,
-                            sizeof(*events) * copied)) {
-                kvfree(events);
-                return -EFAULT;
-            }
+        raw_spin_unlock_irqrestore(&s->event_lock, flags);
+        if (copied && copy_to_user((void __user *)poll.events_buffer, events,
+                                  copied * sizeof(*events))) {
+            atomic64_add(copied, &s->dropped);
+            kvfree(events);
+            return -EFAULT;
         }
-        
-        poll.events_ready = copied;
-        poll.result = SNAKEDRV_SUCCESS;
-        if (copy_to_user(uarg, &poll, sizeof(poll)))
-            ret = -EFAULT;
-        else
-            ret = 0;
-        
         kvfree(events);
-        break;
+        poll.events_ready = copied;
+        poll.result = 0;
+        return copy_to_user(uarg, &poll, sizeof(poll)) ? -EFAULT : 0;
+    }
+    case SNAKE_IOCTL_GET_DEBUG_STATS: {
+        struct snakedrv_session *s = file->private_data;
+        struct snake_debug_stats stats = {0};
+        unsigned long flags;
+        raw_spin_lock_irqsave(&s->event_lock, flags);
+        stats.queued = s->count;
+        stats.capacity = s->capacity;
+        raw_spin_unlock_irqrestore(&s->event_lock, flags);
+        stats.dropped = atomic64_read(&s->dropped);
+        stats.contention = atomic64_read(&s->contention);
+        return copy_to_user(uarg, &stats, sizeof(stats)) ? -EFAULT : 0;
     }
 
     /* ========================================================================
@@ -1867,7 +1886,7 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         if (copy_from_user(&exec, uarg, sizeof(exec)))
             return -EFAULT;
 
-        p = get_proc(exec.params.pid);
+        p = get_proc(file, exec.params.pid);
         if (!p) {
             exec.result = -ESRCH;
             if (copy_to_user(uarg, &exec, sizeof(exec)))
@@ -1986,12 +2005,13 @@ skip_vma_scan:
             case SCAN_TYPE_EXACT_VALUE:
                 /* Check if this is a rescan (result_set_id provided) */
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_exact_value_rescan(p->backend, prev_set, result_set,
                                                                  params.search_value, params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2001,11 +2021,12 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_CHANGED_VALUE:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_changed_values(p->backend, prev_set, result_set, params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2014,11 +2035,12 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_UNCHANGED_VALUE:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_unchanged_values(p->backend, prev_set, result_set, params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2027,11 +2049,12 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_INCREASED_VALUE:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_increased_values(p->backend, prev_set, result_set, params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2040,11 +2063,12 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_DECREASED_VALUE:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_decreased_values(p->backend, prev_set, result_set, params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2053,13 +2077,14 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_INCREASED_BY:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_increased_by(p->backend, prev_set, result_set,
                                                            exec.params.search_value,
                                                            params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2068,13 +2093,14 @@ skip_vma_scan:
                 break;
             case SCAN_TYPE_DECREASED_BY:
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_decreased_by(p->backend, prev_set, result_set,
                                                            exec.params.search_value,
                                                            params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2084,14 +2110,15 @@ skip_vma_scan:
             case SCAN_TYPE_RANGE:
                 /* Value between min and max */
                 if (exec.params.result_set_id > 0) {
-                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id);
-                    if (prev_set) {
+                    struct scan_result_set *prev_set = scanner_cache_get(exec.params.result_set_id, file);
+                    if (prev_set && prev_set->pid == exec.params.pid) {
                         scan_result = scanner_value_between(p->backend, prev_set, result_set,
                                                             exec.params.search_value,
                                                             exec.params.search_value_2,
                                                             params.value_size);
                         scanner_cache_put(prev_set);
                     } else {
+                        scanner_cache_put(prev_set);
                         scan_result = -EINVAL;
                     }
                 } else {
@@ -2124,6 +2151,10 @@ skip_vma_scan:
             /* Convert kernel scan_result to userland snake_scan_result */
             struct snake_scan_result *user_results = kvmalloc(
                 exec.results_count * sizeof(struct snake_scan_result), GFP_KERNEL);
+            if (!user_results) {
+                scanner_cache_put(result_set);
+                return -ENOMEM;
+            }
             if (user_results) {
                 uint32_t i;
                 for (i = 0; i < exec.results_count; i++) {
@@ -2145,12 +2176,17 @@ skip_vma_scan:
 
         /* Cache the result set for potential rescans */
         result_set->scan_type = exec.params.scan_type;
-        exec.result_set_id = scanner_cache_add(result_set);
+        exec.result_set_id = scanner_cache_add(result_set, file, exec.params.pid);
+        if (!exec.result_set_id) {
+            scanner_cache_put(result_set);
+            return -ENOSPC;
+        }
         exec.result = 0;
-
-        if (copy_to_user(uarg, &exec, sizeof(exec)))
+        if (copy_to_user(uarg, &exec, sizeof(exec))) {
+            scanner_cache_remove(exec.result_set_id, file);
             ret = -EFAULT;
-
+        }
+        scanner_cache_put(result_set);
         break;
     }
 
@@ -2162,7 +2198,7 @@ skip_vma_scan:
         if (copy_from_user(&exec, uarg, sizeof(exec)))
             return -EFAULT;
 
-        set = scanner_cache_get(exec.params.result_set_id);
+        set = scanner_cache_get(exec.params.result_set_id, file);
         if (!set) {
             exec.result = -ENOENT;
             if (copy_to_user(uarg, &exec, sizeof(exec)))
@@ -2216,7 +2252,7 @@ skip_vma_scan:
             return -EFAULT;
 
         if (result_set_id > 0)
-            scanner_cache_remove(result_set_id);
+            scanner_cache_remove(result_set_id, file);
 
         break;
     }
@@ -2228,7 +2264,7 @@ skip_vma_scan:
         if (copy_from_user(&info, uarg, sizeof(info)))
             return -EFAULT;
 
-        set = scanner_cache_get(info.result_set_id);
+        set = scanner_cache_get(info.result_set_id, file);
         if (!set)
             return -ENOENT;
 
@@ -2384,7 +2420,7 @@ skip_vma_scan:
 
         if (copy_from_user(&sa, uarg, sizeof(sa)))
             return -EFAULT;
-        ret = injector_shadow_alloc(&sa);
+        ret = injector_shadow_alloc(&sa, file);
         sa.result = ret;
         if (copy_to_user(uarg, &sa, sizeof(sa)))
             return -EFAULT;
@@ -2397,7 +2433,7 @@ skip_vma_scan:
 
         if (copy_from_user(&sw, uarg, sizeof(sw)))
             return -EFAULT;
-        written = injector_shadow_write(&sw);
+        written = injector_shadow_write(&sw, file);
         sw.result = (int32_t)written;
         if (copy_to_user(uarg, &sw, sizeof(sw)))
             return -EFAULT;
@@ -2410,7 +2446,7 @@ skip_vma_scan:
 
         if (copy_from_user(&sa, uarg, sizeof(sa)))
             return -EFAULT;
-        ret = injector_shadow_free(&sa);
+        ret = injector_shadow_free(&sa, file);
         sa.result = ret;
         if (copy_to_user(uarg, &sa, sizeof(sa)))
             return -EFAULT;
@@ -2431,7 +2467,24 @@ skip_vma_scan:
 
 static int snakedrv_open(struct inode *inode, struct file *file)
 {
-    SDRV_DEBUG("Device opened\n");
+    struct snakedrv_session *s;
+    unsigned int capacity = READ_ONCE(param_event_queue_size);
+    if (!capacity || capacity > 4096)
+        return -EINVAL;
+    s = kzalloc(sizeof(*s), GFP_KERNEL);
+    if (!s)
+        return -ENOMEM;
+    s->events = kvcalloc(capacity, sizeof(*s->events), GFP_KERNEL);
+    if (!s->events) {
+        kfree(s);
+        return -ENOMEM;
+    }
+    s->capacity = capacity;
+    raw_spin_lock_init(&s->event_lock);
+    init_waitqueue_head(&s->event_waitq);
+    atomic64_set(&s->dropped, 0);
+    atomic64_set(&s->contention, 0);
+    file->private_data = s;
     return 0;
 }
 
@@ -2447,6 +2500,7 @@ static int snakedrv_release(struct inode *inode, struct file *file)
         list_for_each_entry(p, &attached_list, list) {
             if (p->owner == file) {
                 victim = p;
+                WRITE_ONCE(p->detached, true);
                 list_del(&p->list);
                 atomic_dec(&attached_count);
                 break;
@@ -2457,17 +2511,18 @@ static int snakedrv_release(struct inode *inode, struct file *file)
         if (!victim)
             break;
 
-        cleanup_breakpoints(victim);
-
-        /* Release backend */
-        if (victim->backend)
-            backend_put(victim->backend);
-
-        kfree(victim);
         SDRV_INFO("Auto-detached from PID %d on close\n", victim->pid);
+        cleanup_breakpoints(victim);
+        put_proc(victim);
     }
 
-    SDRV_DEBUG("Device closed\n");
+    scanner_cache_remove_owner(file);
+    injector_shadow_cleanup_owner(file);
+    if (file->private_data) {
+        struct snakedrv_session *s = file->private_data;
+        kvfree(s->events);
+        kfree(s);
+    }
     return 0;
 }
 
@@ -2491,9 +2546,13 @@ static int __init snakedrv_init(void)
     
     SDRV_INFO("Loading SnakeEngine Driver v%s\n", SNAKEDRV_VERSION_STRING);
     
+    ret = injector_init();
+    if (ret)
+        return ret;
     ret = alloc_chrdev_region(&snakedrv_devnum, 0, 1, SNAKEDRV_DEVICE_NAME);
     if (ret < 0) {
         SDRV_ERR("Failed to alloc chrdev: %d\n", ret);
+        injector_cleanup();
         return ret;
     }
     
@@ -2546,40 +2605,33 @@ err_class:
     cdev_del(&snakedrv_cdev);
 err_cdev:
     unregister_chrdev_region(snakedrv_devnum, 1);
+    injector_cleanup();
     return ret;
 }
 
 static void __exit snakedrv_exit(void)
 {
     struct attached_proc *p, *tmp;
-    struct event_entry *e, *etmp;
 
     SDRV_INFO("Unloading driver\n");
 
-    /* Cleanup all attached processes */
+    /* No open file can remain on a normal module unload. Keep the defensive
+     * cleanup consistent with detach and close, including all owned references. */
+    LIST_HEAD(retired);
     mutex_lock(&attach_mutex);
-    list_for_each_entry_safe(p, tmp, &attached_list, list) {
-        list_del(&p->list);
-        cleanup_breakpoints(p);
-
-        /* Release backend */
-        if (p->backend)
-            backend_put(p->backend);
-
-        kfree(p);
-    }
+    list_splice_init(&attached_list, &retired);
+    list_for_each_entry(p, &retired, list)
+        WRITE_ONCE(p->detached, true);
+    atomic_set(&attached_count, 0);
     mutex_unlock(&attach_mutex);
-    
-    /* Clear event queue */
-    spin_lock(&event_lock);
-    list_for_each_entry_safe(e, etmp, &event_list, list) {
-        list_del(&e->list);
-        kfree(e);
+    list_for_each_entry_safe(p, tmp, &retired, list) {
+        list_del_init(&p->list);
+        cleanup_breakpoints(p);
+        put_proc(p);
     }
-    spin_unlock(&event_lock);
-
-    /* Cleanup all shadow allocations */
-    injector_shadow_cleanup_all();
+    
+    /* Drain owned workers before module text and mappings disappear. */
+    injector_cleanup();
 
     /* Cleanup scanner subsystem */
     snakedrv_scanner_cleanup();

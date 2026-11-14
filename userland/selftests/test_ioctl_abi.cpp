@@ -6,7 +6,7 @@
 #include <iostream>
 #include <sys/ioctl.h>
 
-constexpr std::array<unsigned int, 33> kIoctls = {
+constexpr std::array<unsigned int, 34> kIoctls = {
     _IOC_NR(SNAKE_IOCTL_READ_MEMORY),
     _IOC_NR(SNAKE_IOCTL_WRITE_MEMORY),
     _IOC_NR(SNAKE_IOCTL_QUERY_MEMORY),
@@ -22,6 +22,7 @@ constexpr std::array<unsigned int, 33> kIoctls = {
     _IOC_NR(SNAKE_IOCTL_POLL_EVENTS),
     _IOC_NR(SNAKE_IOCTL_GET_REGS),
     _IOC_NR(SNAKE_IOCTL_SET_REGS),
+    _IOC_NR(SNAKE_IOCTL_GET_DEBUG_STATS),
     _IOC_NR(SNAKE_IOCTL_GET_INFO),
     _IOC_NR(SNAKE_IOCTL_INJECT_ALLOC),
     _IOC_NR(SNAKE_IOCTL_INJECT_PROTECT),

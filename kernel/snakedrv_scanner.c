@@ -194,165 +194,108 @@ int scanner_cache_init(void)
  *
  * Frees all cached result sets.
  */
-void scanner_cache_cleanup(void)
-{
-	struct scan_result_set *set, *tmp;
-	unsigned long flags;
-	uint32_t freed = 0;
-
-	spin_lock_irqsave(&global_result_cache.lock, flags);
-
-	list_for_each_entry_safe(set, tmp, &global_result_cache.list, list) {
-		list_del(&set->list);
-		spin_unlock_irqrestore(&global_result_cache.lock, flags);
-
-		scanner_free_result_set(set);
-		freed++;
-
-		spin_lock_irqsave(&global_result_cache.lock, flags);
-	}
-
-	global_result_cache.count = 0;
-	spin_unlock_irqrestore(&global_result_cache.lock, flags);
-
-	pr_info("snakedrv: Result set cache cleaned up (%u sets freed)\n", freed);
-}
-
-/**
- * scanner_cache_add - Add a result set to cache and assign ID
- * @set: Result set to cache
- *
- * Return: Unique ID for the result set, or 0 on error
- */
-uint32_t scanner_cache_add(struct scan_result_set *set)
-{
-	unsigned long flags;
-	uint32_t id;
-
-	if (!set)
-		return 0;
-
-	spin_lock_irqsave(&global_result_cache.lock, flags);
-
-	/* Check cache limit */
-	if (global_result_cache.count >= global_result_cache.max_cached) {
-		spin_unlock_irqrestore(&global_result_cache.lock, flags);
-		pr_warn("snakedrv: Result set cache full (%u sets)\n",
-		        global_result_cache.max_cached);
-		return 0;
-	}
-
-	/* Assign unique ID */
-	id = global_result_cache.next_id++;
-	if (global_result_cache.next_id == 0)  /* Wraparound protection */
-		global_result_cache.next_id = 1;
-
-	set->id = id;
-	atomic_set(&set->ref_count, 1);  /* Initial reference */
-
-	/* Add to cache */
-	list_add_tail(&set->list, &global_result_cache.list);
-	global_result_cache.count++;
-
-	spin_unlock_irqrestore(&global_result_cache.lock, flags);
-
-	pr_debug("snakedrv: Cached result set ID %u (%u results, %u total cached)\n",
-	         id, set->count, global_result_cache.count);
-
-	return id;
-}
-
-/**
- * scanner_cache_get - Get a result set from cache by ID
- * @id: Result set ID
- *
- * Increments reference count. Must call scanner_cache_put() when done.
- *
- * Return: Pointer to result set, or NULL if not found
- */
-struct scan_result_set *scanner_cache_get(uint32_t id)
-{
-	struct scan_result_set *set = NULL;
-	struct scan_result_set *iter;
-	unsigned long flags;
-
-	if (id == 0)
-		return NULL;
-
-	spin_lock_irqsave(&global_result_cache.lock, flags);
-
-	list_for_each_entry(iter, &global_result_cache.list, list) {
-		if (iter->id == id) {
-			set = iter;
-			atomic_inc(&set->ref_count);
-			break;
-		}
-	}
-
-	spin_unlock_irqrestore(&global_result_cache.lock, flags);
-
-	if (set)
-		pr_debug("snakedrv: Retrieved cached result set ID %u (refcount=%d)\n",
-		         id, atomic_read(&set->ref_count));
-	else
-		pr_warn("snakedrv: Result set ID %u not found in cache\n", id);
-
-	return set;
-}
-
-/**
- * scanner_cache_put - Release reference to cached result set
- * @set: Result set to release
- *
- * Decrements reference count. If reaches 0, the set remains cached but
- * can be evicted later.
- */
+/* The cache owns one reference; readers own independent references. */
 void scanner_cache_put(struct scan_result_set *set)
 {
-	if (!set || set->id == 0)
-		return;
-
-	if (atomic_dec_and_test(&set->ref_count)) {
-		pr_debug("snakedrv: Result set ID %u reference count reached 0\n",
-		         set->id);
-	}
+    if (set && refcount_dec_and_test(&set->ref_count))
+        scanner_free_result_set(set);
 }
 
-/**
- * scanner_cache_remove - Remove a result set from cache
- * @id: Result set ID to remove
- *
- * Removes from cache and frees the result set.
- */
-void scanner_cache_remove(uint32_t id)
+void scanner_cache_remove_owner(void *owner)
 {
-	struct scan_result_set *set = NULL;
-	struct scan_result_set *iter;
-	unsigned long flags;
+    struct scan_result_set *set, *tmp;
+    unsigned long flags;
+    LIST_HEAD(retired);
 
-	if (id == 0)
-		return;
+    spin_lock_irqsave(&global_result_cache.lock, flags);
+    list_for_each_entry_safe(set, tmp, &global_result_cache.list, list) {
+        if (!owner || set->owner == owner) {
+            list_move_tail(&set->list, &retired);
+            global_result_cache.count--;
+        }
+    }
+    spin_unlock_irqrestore(&global_result_cache.lock, flags);
 
-	spin_lock_irqsave(&global_result_cache.lock, flags);
+    list_for_each_entry_safe(set, tmp, &retired, list) {
+        list_del_init(&set->list);
+        scanner_cache_put(set);
+    }
+}
 
-	list_for_each_entry(iter, &global_result_cache.list, list) {
-		if (iter->id == id) {
-			set = iter;
-			list_del(&set->list);
-			global_result_cache.count--;
-			break;
-		}
-	}
+void scanner_cache_cleanup(void)
+{
+    scanner_cache_remove_owner(NULL);
+}
 
-	spin_unlock_irqrestore(&global_result_cache.lock, flags);
+uint32_t scanner_cache_add(struct scan_result_set *set, void *owner, pid_t pid)
+{
+    struct scan_result_set *iter;
+    unsigned long flags;
+    uint32_t id;
+    bool collision;
 
-	if (set) {
-		pr_debug("snakedrv: Removed result set ID %u from cache\n", id);
-		scanner_free_result_set(set);
-	} else {
-		pr_warn("snakedrv: Attempted to remove non-existent result set ID %u\n",
-		        id);
-	}
+    if (!set || !owner)
+        return 0;
+    spin_lock_irqsave(&global_result_cache.lock, flags);
+    if (global_result_cache.count >= global_result_cache.max_cached) {
+        spin_unlock_irqrestore(&global_result_cache.lock, flags);
+        return 0;
+    }
+    do {
+        id = global_result_cache.next_id++;
+        if (!global_result_cache.next_id)
+            global_result_cache.next_id = 1;
+        collision = false;
+        list_for_each_entry(iter, &global_result_cache.list, list) {
+            if (iter->id == id) {
+                collision = true;
+                break;
+            }
+        }
+    } while (collision);
+    set->id = id;
+    set->owner = owner;
+    set->pid = pid;
+    refcount_inc(&set->ref_count);
+    list_add_tail(&set->list, &global_result_cache.list);
+    global_result_cache.count++;
+    spin_unlock_irqrestore(&global_result_cache.lock, flags);
+    return id;
+}
+
+struct scan_result_set *scanner_cache_get(uint32_t id, void *owner)
+{
+    struct scan_result_set *iter, *set = NULL;
+    unsigned long flags;
+
+    spin_lock_irqsave(&global_result_cache.lock, flags);
+    list_for_each_entry(iter, &global_result_cache.list, list) {
+        if (iter->id == id && iter->owner == owner) {
+            refcount_inc(&iter->ref_count);
+            set = iter;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&global_result_cache.lock, flags);
+    return set;
+}
+
+void scanner_cache_remove(uint32_t id, void *owner)
+{
+    struct scan_result_set *iter, *set = NULL;
+    unsigned long flags;
+
+    spin_lock_irqsave(&global_result_cache.lock, flags);
+    list_for_each_entry(iter, &global_result_cache.list, list) {
+        if (iter->id == id && iter->owner == owner) {
+            set = iter;
+            list_del_init(&set->list);
+            global_result_cache.count--;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&global_result_cache.lock, flags);
+    scanner_cache_put(set);
 }
 
 /* ============================================================================
@@ -428,7 +371,7 @@ struct scan_result_set *scanner_create_result_set(uint32_t max_results)
 
 	/* Initialize cache fields */
 	set->id = 0;  /* Not cached yet */
-	atomic_set(&set->ref_count, 0);
+	refcount_set(&set->ref_count, 1);
 	INIT_LIST_HEAD(&set->list);
 
 	/* Enable Bloom filter for large result sets (>10K results) */

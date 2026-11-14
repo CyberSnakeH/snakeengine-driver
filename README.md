@@ -5,22 +5,22 @@
 ![Kernel](https://img.shields.io/badge/kernel-6.1%2B-green)
 ![License](https://img.shields.io/badge/license-GPLv2-red)
 
-Hardened memory-access and hardware-breakpoint driver for Linux, inspired by Cheat Engine's DBK on Windows. Kernel module + modern C++ userland API with dlopen injection, ImGui overlay support, and VMA stealth. Research and educational use only.
+Hardened memory-access and hardware-breakpoint driver for Linux, inspired by Cheat Engine's DBK on Windows. Kernel module + modern C++ userland API with process memory access, hardware debugging, native memory protection, and ELF mapping helpers. Research and educational use only.
 
 ## Highlights
 
-- **Kernel driver** (`kernel/`): `/dev/snakedrv`, process attach/detach, forced read/write, memory region enumeration, hardware breakpoints, debug event queue, physical memory access, and VMA unlinking for stealth.
+- **Kernel driver** (`kernel/`): `/dev/snakedrv`, process attach/detach, forced read/write, memory region enumeration, hardware breakpoints with thread inheritance, per-client event queues, physical memory access, and tracked pinned mappings.
 - **Userland library** (`userland/`): typed C/C++ API (`snakedrv.h`, `libsnakedrv.hpp`) plus ELF mapping/injection helpers and remote symbol resolution.
 - **Memory scanner** (`libsnakedrv_scanner`): Cheat Engine-style scans (exact/range/changed/pattern/float/string) with bloom filter acceleration and parallel scanning.
 - **dlopen injection**: inject any `.so` into a running process via `dlopen` — full C++ runtime, TLS, exception handling, and OpenGL support out of the box.
 - **ImGui overlay**: inject a Dear ImGui window into SDL2/OpenGL games (e.g. AssaultCube) with DYNAPI hook.
-- **VMA stealth**: hide injected `.so` from `/proc/pid/maps` via maple tree VMA unlinking.
+- **Mapping lifetime**: pinned allocations retain normal VMAs and belong to the opening client. Legacy VMA unlinking is unsupported in ABI 3.
 - **Automation** (`deploy.sh`): deps, build, install, load/unload, test, inject, SELinux policy, DKMS integration.
 - **Security** (`security/`): udev rules, AppArmor profile, SELinux policy (v2.0 with kernel thread + unconfined_t support), Secure Boot signing.
 
 ## Requirements
 
-- Linux kernel 6.1+ on x86_64 (VMA unlinking relies on Maple Tree)
+- Linux kernel 6.1+ on x86_64
 - Kernel headers matching the running kernel
 - gcc, g++, make, cmake
 - SDL2-devel, mesa-libGL-devel (for ImGui payload)
@@ -57,7 +57,7 @@ To update from a signed GitHub release:
 /usr/lib/snakeengine/snakedrv-updater --check
 sudo /usr/lib/snakeengine/snakedrv-updater --latest
 # Or choose a specific release:
-sudo /usr/lib/snakeengine/snakedrv-updater 2.0.3
+sudo /usr/lib/snakeengine/snakedrv-updater 2.1.0
 ```
 
 `--latest` installs the latest stable release when invoked. Kernel upgrades
@@ -72,10 +72,10 @@ After reviewing and committing the release changes under your own Git identity,
 and synchronizing `main` with `origin/main`:
 
 ```bash
-bash scripts/version.sh --check-tag v2.0.3
+bash scripts/version.sh --check-tag v2.1.0
 git push origin main
-git tag -a v2.0.3 -m "SnakeEngine driver 2.0.3"
-git push origin v2.0.3
+git tag -a v2.1.0 -m "SnakeEngine driver 2.1.0"
+git push origin v2.1.0
 ```
 
 The tag push runs `.github/workflows/release.yml`: validate the version,
@@ -91,7 +91,7 @@ Use a new version/tag for subsequent fixes. A manual rerun must target the
 tag so its signing identity remains compatible with the updater:
 
 ```bash
-gh workflow run release.yml --ref v2.0.3 -f tag=v2.0.3
+gh workflow run release.yml --ref v2.1.0 -f tag=v2.1.0
 ```
 
 ## Injection (dlopen method)
@@ -106,7 +106,7 @@ sudo dlopen_inject <pid> /path/to/payload.so
 sudo ./deploy.sh inject <pid> /path/to/payload.so
 ```
 
-The payload must export a `ManualMapEntry(void*)` function. Manual-map stealth is intentionally disabled for now: hiding the VMA before the payload has faulted all pages can crash the target on later page faults.
+The manual mapper requires an exported `ManualMapEntry(void*)`. All mappings retain normal VMAs. In ABI 3, `INJECT_STEALTH` returns `EOPNOTSUPP`; pinned allocations are also visible and are released when their owning driver descriptor closes.
 
 ### ImGui overlay example
 
@@ -121,6 +121,66 @@ sudo dlopen_inject $(pgrep assaultcube) libpayload_dlopen.so
 ```
 
 This injects a Dear ImGui overlay window into the game via SDL2 DYNAPI hook.
+
+## Runtime safety and memory protection (ABI 3)
+
+`Driver::open()` checks the loaded module ABI. Upgrade the module and SDK
+as a matching pair; ABI 2 clients must be rebuilt for these lifetime semantics.
+
+Breakpoint callbacks use preallocated per-client rings. They do not allocate,
+acquire mutexes, walk mutable attachment lists, or execute SIMD instructions.
+`debugStats()` / `GET_DEBUG_STATS` report queue capacity, queued events, dropped
+events, and drops caused by lock contention. The default capacity is 256 and
+new descriptors accept configured capacities from 1 to 4096. XMM fields are
+not sampled by this callback.
+
+Process-wide breakpoints inherit into subsequently created threads through
+perf's thread-only inheritance. Clearing a root event also removes its inherited
+events. Notification is the default; request a process stop explicitly:
+
+```cpp
+auto bp = drv.setBreakpoint(address, snake::BreakpointType::Write,
+    snake::BreakpointLength::Byte8, 0, true);
+auto stats = drv.debugStats();
+```
+
+The last arguments select the thread (`0` for the process) and stop-on-hit.
+Stops are delivered as `SIGSTOP` outside the debug callback. Continue through
+the driver when ready; detach/close also releases a stop owned by that client.
+
+`Driver::injectProtect()` applies the target's native `mprotect` syscall,
+including permission removal, page-table updates, subranges and the kernel's
+normal permission checks. For another process the SDK pauses its threads via
+ptrace, temporarily executes the syscall, restores instructions and registers,
+and restores the prior stopped/running state. Existing trace owners are rejected.
+The legacy kernel `INJECT_PROTECT` command returns `EOPNOTSUPP`, rather than
+claiming success after changing only VMA flags. The SDK requires this response
+after the driver's capability check before invoking its native implementation.
+
+Cached scan results retain independent references for readers and are scoped to
+the owning descriptor and scan PID. Pinned mappings likewise retain reader
+references during explicit free or close. Timed-out allocation jobs retain their
+own context and mm reference, reclaim unclaimed mappings, and are drained before
+module unload. Arbitrary removal of VMAs from kernel tracking is disabled.
+
+## Regression tests
+
+```bash
+cmake -S userland -B /tmp/snakedrv-tests -DSNAKEDRV_BUILD_TESTS=ON
+cmake --build /tmp/snakedrv-tests -j2
+ctest --test-dir /tmp/snakedrv-tests --output-on-failure
+
+# Requires matching boot image/headers, QEMU, cpio and CMake. No host module load.
+python3 scripts/test-kernel-runtime.py
+```
+
+The diskless guest exercises breakpoint inheritance, leader exit, stop-on-hit,
+client isolation, event overflow, concurrent detach/registration, result-cache
+read/free, pinned-page write/free, close cleanup, and delayed-worker unload.
+It also tests actual R/RW/RX/PROT_NONE accesses and native-protection restoration.
+`TESTING=1` enables the guest-only worker-delay hook; production builds omit it.
+These checks run in CI and gate source releases. Serial logs are retained as
+CI artifacts. Kernel sanitizer coverage depends on the selected test kernel.
 
 ## C++ API usage
 
@@ -193,7 +253,7 @@ kernel/          Kernel driver (snakedrv.ko)
   snakedrv_main.c          Core driver, IOCTLs, capability checks
   snakedrv_scanner.c       Memory scanner with bloom filter
   snakedrv_backend_process.c  Process memory backend
-  snakedrv_injector.c      Injection: alloc, stealth, thread hijack, shadow memory
+  snakedrv_injector.c      Allocation workers, thread hijack, pinned mappings
   snakedrv_backend.h       Backend abstraction (VFS-style vtable)
   snakedrv_optimize.h      Cache prefetch, huge page support
   snakedrv_bloom.h         Bloom filter for scan rescans
@@ -227,6 +287,22 @@ sign-module.sh   Secure Boot module signing (MOK)
 - If Secure Boot blocks loading, sign the module with `./sign-module.sh`
 
 ## Changelog
+
+### 2.1.0 (2026-11-14)
+
+- Bumped the driver ABI to 3 for per-client resource lifetimes and explicit
+  rejection of legacy partial protection/VMA-unlinking operations.
+- Replaced the global allocating breakpoint callback with preallocated client
+  rings, immutable callback contexts, deferred notifications and loss counters.
+- Serialized breakpoint updates, enabled thread-only inheritance, and added
+  optional stop-on-hit with cleanup of inherited events and owned stops.
+- Fixed concurrent result-cache and pinned-page release using independent
+  references; close now releases the client's cached results and pinned mappings.
+- Replaced stack-backed memory workers with owned workqueue jobs that remain
+  valid after timeout and reclaim abandoned allocations before unload.
+- Implemented complete SDK memory-protection changes through native mprotect,
+  with thread, instruction, register and job-control restoration.
+- Added native-permission tests and isolated QEMU kernel regression tests to CI.
 
 ### 2.0.3 (2026-11-14)
 

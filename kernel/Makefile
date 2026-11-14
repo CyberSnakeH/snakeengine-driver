@@ -28,6 +28,9 @@ ccflags-y := -Wall -Wextra -Werror
 ccflags-y += -Wno-unused-parameter
 ccflags-y += -Wno-missing-field-initializers
 ccflags-y += -I$(PWD)/../userland/include
+ifeq ($(TESTING),1)
+ccflags-y += -DSNAKEDRV_SELFTEST
+endif
 
 # Debug build
 ifdef DEBUG

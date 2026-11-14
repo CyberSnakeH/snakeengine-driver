@@ -29,6 +29,7 @@ set(SOURCES
     src/libsnakedrv.cpp
     src/libsnakedrv_scanner.cpp
     src/snakedrv_injector.cpp
+    src/snakedrv_protect.cpp
 )
 
 # Headers
@@ -37,6 +38,7 @@ set(HEADERS
     include/libsnakedrv_scanner.hpp
     include/snakedrv.h
     include/snakedrv_scanner.h
+    include/snakedrv_protect.hpp
 )
 
 # Library target
@@ -70,6 +72,12 @@ include(CPack)
 
 if(SNAKEDRV_BUILD_TESTS)
     enable_testing()
+    add_executable(test_protection selftests/test_protection.cpp src/snakedrv_protect.cpp)
+    target_include_directories(test_protection PRIVATE include)
+    add_test(NAME native_protection COMMAND test_protection)
+    set_tests_properties(native_protection PROPERTIES TIMEOUT 60)
+    add_executable(test_driver_runtime selftests/test_driver_runtime.cpp)
+    target_link_libraries(test_driver_runtime PRIVATE snakedrv)
 
     add_library(manual_map_payload SHARED
         selftests/manual_map_payload.cpp

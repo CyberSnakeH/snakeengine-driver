@@ -300,19 +300,19 @@ static inline void snakedrv_buffer_pool_destroy(struct scan_buffer_pool *pool)
 {
 	struct scan_buffer *buf, *tmp;
 	unsigned long flags;
+	LIST_HEAD(retired);
 
 	spin_lock_irqsave(&pool->lock, flags);
+	list_splice_init(&pool->buffers, &retired);
+	pool->count = 0;
+	spin_unlock_irqrestore(&pool->lock, flags);
 
-	list_for_each_entry_safe(buf, tmp, &pool->buffers, list) {
+	list_for_each_entry_safe(buf, tmp, &retired, list) {
 		list_del(&buf->list);
 		if (buf->data)
 			kvfree(buf->data);
 		kfree(buf);
 	}
-
-	pool->count = 0;
-
-	spin_unlock_irqrestore(&pool->lock, flags);
 
 	pr_info("snakedrv: Buffer pool destroyed (hits: %lld, misses: %lld, hit_rate: %lld%%)\n",
 	        atomic64_read(&pool->hits),

@@ -24,9 +24,9 @@
  * ============================================================================ */
 
 #define SNAKEDRV_VERSION_MAJOR      2
-#define SNAKEDRV_VERSION_MINOR      0
-#define SNAKEDRV_VERSION_PATCH      3
-#define SNAKEDRV_VERSION_STRING     "2.0.3"
+#define SNAKEDRV_VERSION_MINOR      1
+#define SNAKEDRV_VERSION_PATCH      0
+#define SNAKEDRV_VERSION_STRING     "2.1.0"
 
 /*
  * Wire-compatibility ABI version.
@@ -39,7 +39,7 @@
  * SNAKE_IOCTL_GET_INFO.abi_version and refuse to operate if the running
  * driver reports a lower ABI than the one the client was built against.
  */
-#define SNAKEDRV_ABI_VERSION        2
+#define SNAKEDRV_ABI_VERSION        3
 
 #define SNAKEDRV_DEVICE_NAME        "snakedrv"
 #define SNAKEDRV_DEVICE_PATH        "/dev/snakedrv"
@@ -106,7 +106,7 @@ struct snake_memory_region {
 #define SNAKE_PROT_EXEC             (1 << 2)
 #define SNAKE_PROT_SHARED           (1 << 3)
 #define SNAKE_PROT_PRIVATE          (1 << 4)
-#define SNAKE_PROT_STEALTH          (1 << 5)    /* Remove from /proc/maps */
+#define SNAKE_PROT_STEALTH          (1 << 5)    /* Legacy, unsupported in ABI 3 */
 
 /* Region types */
 #define SNAKE_REGION_UNKNOWN        0
@@ -198,6 +198,9 @@ struct snake_thread_info {
 #define SNAKE_BP_TYPE_IO            3   /* I/O breakpoint (x86 specific) */
 
 /* Hardware breakpoint lengths */
+#define SNAKE_BP_FLAG_ENABLED       (1U << 0)
+#define SNAKE_BP_FLAG_STOP_ON_HIT   (1U << 1)
+
 #define SNAKE_BP_LEN_1              0   /* 1 byte */
 #define SNAKE_BP_LEN_2              1   /* 2 bytes */
 #define SNAKE_BP_LEN_4              2   /* 4 bytes */
@@ -214,7 +217,7 @@ struct snake_hw_breakpoint {
     uint32_t        type;           /* Breakpoint type (SNAKE_BP_TYPE_*) */
     uint32_t        length;         /* Breakpoint length (SNAKE_BP_LEN_*) */
     uint32_t        slot;           /* DR slot (0-3, output) */
-    uint32_t        enabled;        /* Enable/disable flag */
+    uint32_t        enabled;        /* SNAKE_BP_FLAG_* bitmask */
     int32_t         result;         /* Result code */
     uint32_t        id;             /* Unique breakpoint ID (output) */
 } __attribute__((packed));
@@ -360,6 +363,13 @@ struct snake_event_poll {
     int32_t         result;         /* Result code */
 } __attribute__((packed));
 
+struct snake_debug_stats {
+    uint32_t queued;
+    uint32_t capacity;
+    uint64_t dropped;
+    uint64_t contention;
+} __attribute__((packed));
+
 /* ============================================================================
  * Physical Memory Operations
  * ============================================================================ */
@@ -463,6 +473,7 @@ struct snake_driver_info {
 #define SNAKE_IOCTL_POLL_EVENTS     _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x34, struct snake_event_poll)
 #define SNAKE_IOCTL_GET_REGS        _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x35, struct snake_regs_op)
 #define SNAKE_IOCTL_SET_REGS        _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x36, struct snake_regs_op)
+#define SNAKE_IOCTL_GET_DEBUG_STATS _IOR(SNAKEDRV_IOCTL_MAGIC, 0x37, struct snake_debug_stats)
 
 /* Driver info */
 #define SNAKE_IOCTL_GET_INFO        _IOR(SNAKEDRV_IOCTL_MAGIC, 0x40, struct snake_driver_info)
@@ -473,7 +484,7 @@ struct snake_driver_info {
 
 /**
  * @struct snake_inject_alloc
- * @brief Allocate memory in target process (stealth)
+ * @brief Allocate a normal mapping in the target process
  */
 struct snake_inject_alloc {
     pid_t           pid;            /* Target process ID */
@@ -485,7 +496,7 @@ struct snake_inject_alloc {
 
 /**
  * @struct snake_inject_protect
- * @brief Change memory protection (e.g., RW -> RX)
+ * @brief Legacy IOCTL payload; use Driver::injectProtect for native mprotect
  */
 struct snake_inject_protect {
     pid_t           pid;            /* Target process ID */
@@ -497,7 +508,7 @@ struct snake_inject_protect {
 
 /**
  * @struct snake_inject_thread
- * @brief Create a remote thread to execute code
+ * @brief Execute code through an existing target thread
  */
 struct snake_inject_thread {
     pid_t           pid;            /* Target process ID */
@@ -513,11 +524,10 @@ struct snake_inject_thread {
 #define SNAKE_IOCTL_INJECT_STEALTH  _IOWR(SNAKEDRV_IOCTL_MAGIC, 0x63, struct snake_inject_protect)
 
 /* ============================================================================
- * Shadow Memory (VMA-less Direct PTE Mapping)
+ * Pinned Memory (legacy SHADOW_* command names)
  *
- * Allocates physical pages and maps them via direct PTE manipulation,
- * completely bypassing VMA creation.  The mapping is invisible to
- * /proc/pid/maps, /proc/pid/smaps, and core dumps.
+ * ABI 3 retains a normal VMA and pins its pages. Entries belong to the
+ * opening file and are released on SHADOW_FREE, file close, or unload.
  * ============================================================================ */
 
 /**

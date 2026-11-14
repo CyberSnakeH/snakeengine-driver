@@ -10,6 +10,7 @@
 
 #include <linux/types.h>
 #include <linux/spinlock.h>
+#include <linux/refcount.h>
 
 /* Forward declaration */
 struct memory_backend;
@@ -78,7 +79,9 @@ struct scan_result_set {
 	bool use_bloom;
 	uint32_t scan_type;
 	uint32_t id;
-	atomic_t ref_count;
+	refcount_t ref_count;
+	void *owner;
+	pid_t pid;
 	struct list_head list;
 };
 
@@ -97,10 +100,11 @@ void scanner_free_result_set(struct scan_result_set *set);
 /* Result set cache management */
 int scanner_cache_init(void);
 void scanner_cache_cleanup(void);
-uint32_t scanner_cache_add(struct scan_result_set *set);
-struct scan_result_set *scanner_cache_get(uint32_t id);
+uint32_t scanner_cache_add(struct scan_result_set *set, void *owner, pid_t pid);
+struct scan_result_set *scanner_cache_get(uint32_t id, void *owner);
 void scanner_cache_put(struct scan_result_set *set);
-void scanner_cache_remove(uint32_t id);
+void scanner_cache_remove(uint32_t id, void *owner);
+void scanner_cache_remove_owner(void *owner);
 
 /* Exact value scanning */
 ssize_t scanner_exact_value(struct memory_backend *backend,
