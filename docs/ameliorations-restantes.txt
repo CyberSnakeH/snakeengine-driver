@@ -1,0 +1,143 @@
+AMÉLIORATIONS RESTANTES — SnakeEngine Driver
+Date : 2026-11-14
+Base relue : 736662f50f46447a98f4ec0bf833cdaf2a22c19c (v2.1.0)
+
+Cette liste provient d'une relecture ciblée du code. Elle distingue les défauts
+visibles dans la source des risques restant à reproduire. Ce n'est pas un audit
+exhaustif. Les tests de la 2.1.0 passent, mais ne couvrent pas tous ces chemins.
+Les corrections ne sont pas réalisées par la création de ce document.
+
+ARCHIVE VMA
+
+archives/vma-avant-2.1.0.txt conserve le fichier snakedrv_injector.c complet du
+commit 80db3e15046685c678aee4330f9e7e8bcf4a9eae, avec son empreinte SHA-256.
+Il contient donc le mécanisme VMA retiré et son contexte, sans modification.
+C'est une archive texte hors compilation ; le masquage reste désactivé.
+
+P0 — À TRAITER EN PREMIER : STABILITÉ ET INTÉGRITÉ
+
+1. Fin de vie des workers du scanner parallèle — défaut visible dans la source.
+   Source : kernel/snakedrv_scanner.c, scanner_exact_value_parallel().
+   En cas d'interruption de wait_for_completion_interruptible(), le code continue
+   puis libère workers et completions sans s'assurer que le worker interrompu a
+   fini. Il peut alors accéder à de la mémoire libérée, y compris aux résultats
+   ou au backend dont l'appelant peut ensuite relâcher les références.
+   À faire : garantir la fin effective de tous les travaux avant toute libération,
+   et définir le comportement d'annulation. Les corrections de durée de vie de
+   la 2.1.0 ne couvrent donc pas encore ce chemin distinct du scanner parallèle.
+   Validation attendue : scan parallèle interrompu par un signal, cible active,
+   avec détection mémoire noyau et déchargement après terminaison des travaux.
+
+2. Verrou mmap maintenu pendant le scan de toutes les VMA — risque à reproduire.
+   Sources : kernel/snakedrv_main.c, SNAKE_IOCTL_SCAN_EXECUTE ;
+             kernel/snakedrv_backend_process.c, process_backend_read().
+   Le parcours conserve mmap_read_lock alors que le scanner appelle le backend
+   et peut attendre des workers. Les lectures utilisent access_process_vm().
+   À faire : revoir l'ordre des verrous et la durée du verrou de parcours pour
+   éviter une attente circulaire pendant des mmap/munmap/mprotect concurrents.
+   Validation attendue : scans séquentiels et parallèles pendant des changements
+   de mappings, avec lockdep et délais maximum contrôlés.
+
+3. Cohérence des registres et du pas-à-pas — synchronisation insuffisante.
+   Source : kernel/snakedrv_main.c, do_get_regs(), do_set_regs(), do_single_step().
+   GET_REGS lit task_pt_regs sans arrêt garanti ; SET_REGS vérifie un état arrêté
+   sans en posséder durablement le contrôle ; le pas-à-pas modifie directement
+   un indicateur de thread. Des champs sont des zéros de remplacement (XMM,
+   bases FS/GS et registres de debug), sans indicateur de validité dans l'API.
+   À faire : définir un contrat d'arrêt/synchronisation et de validité des champs,
+   puis tester la concurrence avec continue, detach, signaux et sortie du thread.
+
+4. Traduction virtuelle/physique — contrat GUP et compatibilité à corriger.
+   Source : kernel/snakedrv_main.c, do_virt_to_phys().
+   L'appel à get_user_pages_remote n'est pas entouré d'un mmap_read_lock explicite.
+   La branche destinée aux noyaux antérieurs à 6.5 doit également être vérifiée
+   contre leur signature réelle. La CI actuelle ne teste pas Linux 6.1 malgré
+   le minimum annoncé dans le README.
+   Validation attendue : compilation sur 6.1 et test en VM avec mappings qui
+   changent pendant la traduction ; aucun essai destructif sur la machine hôte.
+
+P1 — ROBUSTESSE DES ERREURS ET DES IDENTITÉS
+
+5. Échecs de restauration de la protection native — cas rares non couverts.
+   Source : userland/src/snakedrv_protect.cpp, TraceScope::restore().
+   Un échec POKETEXT/SETREGS est enregistré, mais la boucle de détachement peut
+   continuer. Après un timeout, une attente sans borne est aussi possible.
+   À faire : définir explicitement la récupération et le signalement lorsqu'une
+   restauration échoue, sans annoncer une restauration réussie. Couvrir signaux,
+   mort du thread exécuteur, sortie du processus et échecs des appels ptrace.
+   Les tests actuels valident les chemins normaux, les erreurs mprotect et les
+   conflits avec un traceur existant, pas tous ces échecs internes.
+
+6. Identité de l'espace mémoire après exec — risque de mélange ancien/nouveau.
+   Sources : kernel/snakedrv_backend_process.c, backend_create_process() ;
+             kernel/snakedrv_main.c, parcours des VMA et recherches par PID.
+   Le backend garde le mm acquis à l'attachement, tandis qu'access_process_vm
+   travaille à partir du task. Après exec, ces deux vues peuvent diverger.
+   À faire : choisir entre invalider l'attachement ou actualiser son contexte,
+   et vérifier les usages du PID numérique face à sa réutilisation.
+   Validation attendue : exec, sortie et réattachement pendant des opérations.
+
+7. Nettoyage des opérations partiellement publiées — défauts visibles.
+   Sources : kernel/snakedrv_main.c, INJECT_ALLOC et SHADOW_ALLOC ;
+             userland/src/snakedrv_injector.cpp, ManualMapper::inject().
+   Un échec copy_to_user après une allocation n'effectue pas son rollback immédiat.
+   Plusieurs sorties en erreur du chargeur manuel arrivent après l'allocation,
+   sans libération de cette allocation ordinaire. L'UAPI n'expose pas de primitive
+   INJECT_FREE correspondante. La fermeture nettoie les allocations shadow,
+   pas nécessairement les allocations ordinaires abandonnées par ce chemin.
+   À faire : donner aux ressources un propriétaire et une libération définis,
+   puis tester les échecs après allocation. Ce travail concerne le nettoyage,
+   pas l'ajout d'une fonction de dissimulation.
+
+8. Accès physique et autorisations — durcissement à auditer.
+   Sources : kernel/snakedrv_main.c, do_read_phys(), do_write_phys(), gate ioctl ;
+             security/snakeengine.te et security/snakeengine.apparmor.
+   Les opérations physiques limitent la taille mais appellent memremap sans
+   validation explicite du débordement adresse+taille ni politique des ressources
+   autorisées. Les règles SELinux/AppArmor couvrent de nombreux domaines.
+   Le commentaire du gate annonce CAP_SYS_PTRACE plus CAP_SYS_ADMIN, alors que
+   les commandes physiques et d'allocation vérifient seulement CAP_SYS_ADMIN.
+   À faire : établir le contrat voulu, appliquer des contrôles cohérents et
+   tester les refus ; ne pas confondre ce constat avec une exploitation démontrée.
+
+P2 — COMPLÉTUDE, LIMITES ET MAINTENANCE
+
+9. Raccorder les scans annoncés à l'API réellement utilisable.
+   Source : kernel/snakedrv_main.c, dispatch SNAKE_IOCTL_SCAN_EXECUTE.
+   Le premier scan RANGE renvoie explicitement ENOSYS. Les fonctions pattern,
+   float/double, chaînes et chaînes de pointeurs existent dans le scanner mais
+   ne sont pas dispatchées par ce switch. Le SDK propose pourtant plusieurs
+   de ces types. Définir leurs paramètres, erreurs et tests de bout en bout,
+   ou indiquer précisément les types encore non pris en charge.
+
+10. Budgets mémoire, annulation et comportement des grands scans.
+    Source : kernel/snakedrv_scanner.c, scanner_create_result_set() et cache.
+    Il existe déjà un plafond de 10 millions de résultats par jeu, ainsi qu'une
+    limite du nombre de jeux. Cela ne constitue pas un budget global en octets
+    ni un budget par client ; un jeu peut déjà réserver environ 160 Mo, hors
+    filtre Bloom. Ajouter des budgets configurables, une progression et une
+    annulation dont la durée de vie est sûre ; mesurer avant d'optimiser.
+
+11. Étendre les tests à la portée de compatibilité annoncée.
+    Sources : .github/workflows/validate.yml et userland/selftests/.
+    Ajouter Linux 6.1 si ce minimum reste annoncé, des noyaux de test avec KASAN,
+    KCSAN/lockdep selon leur disponibilité, les interruptions du scanner parallèle,
+    les changements de mappings, exec et les erreurs de restauration. Les tests
+    actuels en VM sont utiles mais ne prouvent pas l'absence de toutes les courses.
+    Conserver les essais de module dans des VM jetables.
+
+12. Clarifier les capacités et la documentation de la version actuelle.
+    Sources : README.md ; userland/src/snakedrv_injector.cpp ;
+              kernel/snakedrv_main.c ; UAPI userland/include/snakedrv.h.
+    Certains commentaires parlent encore de VMA masquées ou d'un futur masquage.
+    Distinguer clairement la primitive de détournement d'un thread d'une véritable
+    création de thread, les champs de registres disponibles, les limites ELF du
+    chargeur manuel et le chargement classique. Documenter le rejet x86-32/x32
+    dans la protection native, les erreurs EOPNOTSUPP et la migration ABI 3.
+
+ORDRE CONSEILLÉ
+
+Commencer par 1 et 2, puis 3 et 4 ; traiter ensuite les échecs et l'identité de
+processus (5 à 8), avant d'étendre les fonctionnalités (9 et 10). Les tests (11)
+doivent accompagner les correctifs, et la documentation (12) refléter chaque
+comportement livré. Aucun changement de code noyau n'est réalisé par cette revue.
