@@ -6,7 +6,7 @@
 PACKAGE_NAME="snakedrv"
 PACKAGE_VERSION="@SNAKEDRV_VERSION@"
 
-CLEAN="make -C kernel clean"
+CLEAN="make -C kernel clean KDIR=/lib/modules/${kernelver}/build"
 MAKE[0]="make -C kernel KDIR=/lib/modules/${kernelver}/build CC=${CC:-gcc}"
 
 BUILT_MODULE_NAME[0]="snakedrv"

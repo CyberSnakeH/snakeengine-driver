@@ -8,6 +8,7 @@
 # Usage:
 #   snakedrv-updater <version>
 #   snakedrv-updater --check                 # print latest version
+#   snakedrv-updater --latest                # install latest stable release
 #   snakedrv-updater --help
 #
 # Argv:
@@ -21,7 +22,7 @@
 #      against the cosign-keyless identity pinned below.
 #   3. Stage the source under /usr/src/snakedrv-<version>/, render
 #      dkms.conf with the right version, and either:
-#        a) DKMS path  : dkms remove old + add/autoinstall new
+#        a) DKMS path  : dkms remove old + add/install new
 #        b) Direct path: make -C kernel; cp .ko to /lib/modules/.../extra
 #   4. Install the userland (libsnakedrv.so + headers + pkg-config +
 #      CMake exports).
@@ -50,6 +51,7 @@ usage() {
     cat <<'EOF'
 Usage: snakedrv-updater <version>
        snakedrv-updater --check
+       snakedrv-updater --latest
        snakedrv-updater --help
 
 Fetch, verify, and install a snakeengine-driver release.
@@ -81,6 +83,8 @@ latest_release_version() {
 # ─── Main install path ─────────────────────────────────────────────
 install_release() {
     local version="$1"
+    [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+        || die "invalid version: $version (expected X.Y.Z)"
     local tag="v${version}"
 
     require_root
@@ -94,7 +98,7 @@ install_release() {
         die "sigstore-verify not found at $SIGSTORE_VERIFY (reinstall the snakeengine-driver package?)"
 
     local tmp; tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    trap "rm -rf -- $(printf '%q' "$tmp")" EXIT
 
     local base="https://github.com/${REPO}/releases/download/${tag}"
     local tarball="snakeengine-driver-${version}.tar.gz"
@@ -118,6 +122,8 @@ install_release() {
     tar xzf "$tmp/$tarball" -C "$tmp"
     local src="$tmp/snakeengine-driver-${version}"
     [ -d "$src" ] || die "tarball missing expected top-level dir snakeengine-driver-${version}"
+    bash "$src/scripts/version.sh" --check-tag "$tag" >/dev/null \
+        || die "release tag and source version disagree; refusing to modify the installation"
     local expected_abi
     expected_abi="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_ABI_VERSION/{print $3}' \
         "$src/userland/include/snakedrv.h")"
@@ -134,15 +140,13 @@ install_release() {
         remove_dkms_versions
     fi
     rm -rf "$dkms_src"
-    cp -a "$src" "$dkms_src"
-    sed "s|@SNAKEDRV_VERSION@|${version}|g" \
-        "$src/packaging/dkms/dkms.conf.in" > "$dkms_src/dkms.conf"
+    bash "$src/scripts/stage-dkms.sh" "$dkms_src"
 
     if command -v dkms >/dev/null 2>&1; then
         install_via_dkms "$version"
     else
         warn "dkms not installed — falling back to direct module install"
-        install_direct "$dkms_src"
+        install_direct "$src"
     fi
 
     install_system_integration "$src"
@@ -165,6 +169,12 @@ install_release() {
         PREFIX=/usr LIBDIR="$libdir"
 
     ldconfig
+
+    # Carry fixes to the update flow into subsequent updates as well.
+    local next_updater
+    next_updater="$(mktemp /usr/lib/snakeengine/.snakedrv-updater.XXXXXX)"
+    install -m 0755 "$src/packaging/snakedrv-updater" "$next_updater"
+    mv -f "$next_updater" /usr/lib/snakeengine/snakedrv-updater
 
     log "done. snakeengine-driver ${version} installed and loaded."
 }
@@ -191,11 +201,13 @@ remove_dkms_versions() {
 install_via_dkms() {
     local version="$1"
 
-    log "DKMS add + autoinstall"
+    log "DKMS add + install for prepared kernels"
     dkms add -m snakedrv -v "$version" \
         || die "dkms add failed for snakedrv/$version"
-    dkms autoinstall -m snakedrv -v "$version" \
-        || die "dkms autoinstall failed — kernel-headers package missing for $(uname -r)?"
+    # autoinstall may select other registered versions/modules; install this
+    # exact release. AUTOINSTALL=yes handles subsequent kernel upgrades.
+    bash "/usr/src/snakedrv-$version/install-kernels.sh" "$version" \
+        || die "dkms install failed — inspect /var/lib/dkms/snakedrv/$version/build/make.log"
 }
 
 install_direct() {
@@ -316,6 +328,10 @@ main() {
             v="$(latest_release_version)" || die "could not query GitHub API"
             [ -n "$v" ] || die "could not parse latest release tag"
             printf '%s\n' "$v"
+            ;;
+        --latest)
+            v="$(latest_release_version)" || die "could not query GitHub API"
+            install_release "$v"
             ;;
         v[0-9]*|[0-9]*)
             install_release "${1#v}"

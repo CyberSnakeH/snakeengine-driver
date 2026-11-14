@@ -1,5 +1,16 @@
 cmake_minimum_required(VERSION 3.10)
-project(libsnakedrv VERSION 2.0.2 LANGUAGES CXX)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/include/snakedrv.h" SNAKEDRV_HEADER)
+foreach(part MAJOR MINOR PATCH)
+    string(REGEX MATCH "#define[ \t]+SNAKEDRV_VERSION_${part}[ \t]+([0-9]+)"
+        SNAKEDRV_VERSION_MATCH "${SNAKEDRV_HEADER}")
+    if(NOT SNAKEDRV_VERSION_MATCH)
+        message(FATAL_ERROR "Missing SNAKEDRV_VERSION_${part} in snakedrv.h")
+    endif()
+    set(SNAKEDRV_VERSION_${part} "${CMAKE_MATCH_1}")
+endforeach()
+project(libsnakedrv VERSION
+    "${SNAKEDRV_VERSION_MAJOR}.${SNAKEDRV_VERSION_MINOR}.${SNAKEDRV_VERSION_PATCH}"
+    LANGUAGES CXX)
 
 # Options
 option(BUILD_SHARED_LIBS "Build shared library" ON)

@@ -2,56 +2,138 @@ name: CI
 
 on:
   push:
-    branches: ["main"]
+    branches: [main]
   pull_request:
-    branches: ["main"]
+    branches: [main]
   workflow_dispatch:
+
+# Cancel in-flight CI runs on the same ref when a new commit lands —
+# matters for PR rebases and force-pushes.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   userland:
-    name: Userland Build
-    runs-on: ubuntu-latest
+    name: Userland (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install deps
+      - name: Install build deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y cmake g++ make libelf-dev
+          sudo apt-get install -y --no-install-recommends \
+              build-essential pkg-config
 
-      - name: Build userland
+      - name: Detect version
+        run: make -C userland print-version
+
+      - name: Build libsnakedrv
+        run: make -C userland -j"$(nproc)"
+
+      - name: Sanity-check pkg-config + CMake exports via staging install
         run: |
-          cmake -S userland -B userland/build -DCMAKE_BUILD_TYPE=Release
-          cmake --build userland/build -j2
+          set -eux
+          stage="$(mktemp -d)"
+          make -C userland install DESTDIR="$stage" PREFIX="$HOME/snakedrv"
+          mv "$stage$HOME/snakedrv" "$HOME/snakedrv"
 
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+          # pkg-config sees us
+          PKG_CONFIG_PATH="$HOME/snakedrv/lib/pkgconfig" \
+              pkg-config --exact-version=$(awk '/SNAKEDRV_VERSION_MAJOR/{m=$3} /SNAKEDRV_VERSION_MINOR/{n=$3} /SNAKEDRV_VERSION_PATCH/{p=$3; printf "%d.%d.%d",m,n,p; exit}' userland/include/snakedrv.h) \
+              snakedrv
+
+          # find_package() succeeds with version constraint
+          mkdir -p ci-find-package && cd ci-find-package
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.16)
+          project(probe LANGUAGES CXX)
+          find_package(SnakeDrv 2.0 REQUIRED)
+          message(STATUS "OK SnakeDrv ${SNAKEDRV_VERSION} ABI ${SNAKEDRV_ABI_VERSION}")
+          EOF
+          cmake -B build -DCMAKE_PREFIX_PATH="$HOME/snakedrv"
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-22.04'
         with:
-          name: libsnakedrv-userland
-          path: |
-            userland/build/libsnakedrv.so
-            userland/build/libsnakedrv.a
-          if-no-files-found: warn
+          name: libsnakedrv-${{ matrix.os }}
+          path: userland/libsnakedrv.so
 
-  kernel:
-    name: Kernel Build
-    runs-on: ubuntu-latest
+  validation:
+    uses: ./.github/workflows/validate.yml
+
+  packaging-dry-run:
+    name: nfpm package dry-run
+    runs-on: ubuntu-22.04
+    needs: userland
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Install deps
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tools/sigstore-verify/go.mod
+          cache-dependency-path: tools/sigstore-verify/go.sum
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: libsnakedrv-ubuntu-22.04
+          path: userland/
+
+      - name: Install nfpm
         run: |
-          sudo apt-get update
-          sudo apt-get install -y build-essential
-          if apt-cache show linux-headers-$(uname -r) >/dev/null 2>&1; then
-            sudo apt-get install -y linux-headers-$(uname -r)
-          else
-            echo "No linux-headers package for $(uname -r); skipping kernel build."
-            echo "SKIP_KERNEL=1" >> $GITHUB_ENV
-          fi
+          curl -sSL -o /tmp/nfpm.deb \
+              "https://github.com/goreleaser/nfpm/releases/download/v2.39.0/nfpm_2.39.0_amd64.deb"
+          sudo dpkg -i /tmp/nfpm.deb
 
-      - name: Build kernel module
-        if: env.SKIP_KERNEL != '1'
-        run: make -C kernel
+      - name: Stage + render + build .deb
+        env:
+          STAGE:   ${{ github.workspace }}/stage
+          LIBDIR:  /usr/lib/x86_64-linux-gnu
+          ARCH:    amd64
+        run: |
+          set -eux
+          VERSION="$(bash scripts/version.sh)"
+          ABI_VERSION="$(bash scripts/version.sh --abi)"
+          mkdir -p "$STAGE"
+          make -C userland install \
+              DESTDIR="$STAGE" PREFIX=/usr LIBDIR="$LIBDIR"
+
+          bash scripts/stage-dkms.sh "$STAGE/usr/src/snakedrv-$VERSION"
+
+          make -C tools/sigstore-verify VERSION="$VERSION"
+          install -D -m 0755 tools/sigstore-verify/sigstore-verify \
+              "$STAGE/usr/lib/snakeengine/sigstore-verify"
+
+          mkdir -p "$STAGE/etc/modprobe.d"
+          : > "$STAGE/etc/modprobe.d/snakedrv.conf"
+
+          for s in postinstall preremove postremove; do
+              sed -e "s|@SNAKEDRV_VERSION@|$VERSION|g" \
+                  -e "s|@SNAKEDRV_ABI_VERSION@|$ABI_VERSION|g" \
+                  "packaging/nfpm/${s}.sh" > "$STAGE/${s}.sh"
+              chmod 0755 "$STAGE/${s}.sh"
+          done
+
+          sed -e "s|@SNAKEDRV_VERSION@|$VERSION|g" \
+              -e "s|@LIBDIR@|$LIBDIR|g" \
+              -e "s|@ARCH@|$ARCH|g" \
+              -e "s|@STAGE@|$STAGE|g" \
+              -e "s|@REPO_ROOT@|$GITHUB_WORKSPACE|g" \
+              packaging/nfpm/nfpm.yaml.in > nfpm.yaml
+
+          mkdir -p out
+          nfpm package -f nfpm.yaml -t out --packager deb
+          ls -lh out/
+          dpkg-deb -I out/*.deb
+          dpkg-deb -c out/*.deb > out/contents.txt
+          head -30 out/contents.txt
+          extracted="$(mktemp -d)"
+          dpkg-deb -x out/*.deb "$extracted"
+          test -s "$extracted/usr/src/snakedrv-$VERSION/userland/include/snakedrv.h"
+          test -s "$extracted/usr/src/snakedrv-$VERSION/userland/include/snakedrv_scanner.h"
+          test -x "$extracted/usr/src/snakedrv-$VERSION/install-kernels.sh"

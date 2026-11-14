@@ -10,6 +10,7 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/sched/mm.h>
@@ -151,7 +152,7 @@ static ssize_t process_backend_get_info(struct memory_backend *backend,
 		if (ctx->mm)
 			vm_size = ctx->mm->total_vm << PAGE_SHIFT;
 	} else {
-		strncpy(comm, "<dead>", sizeof(comm));
+		strscpy(comm, "<dead>", sizeof(comm));
 	}
 
 	return scnprintf(buf, size,

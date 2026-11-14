@@ -17,12 +17,15 @@ LDFLAGS  := -s -w -X main.version=$(VERSION)
 # CGO_ENABLED=0 → fully static binary, no glibc dependency.
 export CGO_ENABLED=0
 
-.PHONY: all clean install test
+.PHONY: all clean install test FORCE
 
 all: $(BIN)
 
-$(BIN): main.go go.mod go.sum
+$(BIN): main.go go.mod go.sum FORCE
 	$(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o $@ .
+
+# VERSION is embedded by the linker; changing it must refresh an existing binary.
+FORCE:
 
 install: $(BIN)
 	install -d $(DESTDIR)$(PREFIX)/bin

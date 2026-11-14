@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# SnakeEngine Driver - Professional Deployment Script v2.0.2
+# SnakeEngine Driver - Deployment Script
 #
 # This script handles:
 # - Dependency checking and installation
@@ -54,7 +54,7 @@ umask 022
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_NAME="snakeengine"
 MODULE_NAME="snakedrv"
-VERSION="2.0.2"
+VERSION="$(bash "${SCRIPT_DIR}/scripts/version.sh")"
 
 # Installation paths
 PREFIX="${PREFIX:-/usr/local}"
@@ -514,23 +514,13 @@ install_dkms() {
     # Copy source to DKMS directory
     rm -rf "${DKMS_SRC}"
     mkdir -p "${DKMS_SRC}"
-    cp -r "${SCRIPT_DIR}/kernel" "${DKMS_SRC}/"
-    cp -r "${SCRIPT_DIR}/userland" "${DKMS_SRC}/"
-
-    # Render dkms.conf with the current VERSION so /usr/src/snakedrv-X
-    # and PACKAGE_VERSION inside it never drift.
-    sed "s|@SNAKEDRV_VERSION@|${VERSION}|g" \
-        "${SCRIPT_DIR}/packaging/dkms/dkms.conf.in" \
-        > "${DKMS_SRC}/dkms.conf"
+    bash "${SCRIPT_DIR}/scripts/stage-dkms.sh" "${DKMS_SRC}"
 
     # Add to DKMS
     dkms add -m "${MODULE_NAME}" -v "${VERSION}"
 
-    # Build for current kernel
-    dkms build -m "${MODULE_NAME}" -v "${VERSION}"
-
-    # Install
-    dkms install -m "${MODULE_NAME}" -v "${VERSION}"
+    # Cover the running kernel and newer/older installed kernels with headers.
+    bash "${DKMS_SRC}/install-kernels.sh" "${VERSION}"
 
     log_success "DKMS installation completed"
 }

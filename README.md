@@ -43,6 +43,57 @@ sudo ./deploy.sh load
 ./deploy.sh status
 ```
 
+## Updates and GitHub releases
+
+Install a new source checkout with `sudo ./deploy.sh install` (or use
+`./setup.sh`). Both refresh the registered DKMS sources and build for the
+running kernel and all installed kernels with development headers. DKMS
+rebuilds the module automatically on later kernel upgrades; the matching
+development headers must be installed.
+
+To update from a signed GitHub release:
+
+```bash
+/usr/lib/snakeengine/snakedrv-updater --check
+sudo /usr/lib/snakeengine/snakedrv-updater --latest
+# Or choose a specific release:
+sudo /usr/lib/snakeengine/snakedrv-updater 2.0.3
+```
+
+`--latest` installs the latest stable release when invoked. Kernel upgrades
+rebuild the registered sources; they do not download new GitHub releases.
+
+The release version comes from `userland/include/snakedrv.h`. Update its
+numeric version and `SNAKEDRV_VERSION_STRING` together before a release;
+`deploy.sh`, DKMS staging, Make and CMake use that version. The ABI only
+changes when the public interface becomes incompatible.
+
+After reviewing and committing the release changes under your own Git identity,
+and synchronizing `main` with `origin/main`:
+
+```bash
+bash scripts/version.sh --check-tag v2.0.3
+git push origin main
+git tag -a v2.0.3 -m "SnakeEngine driver 2.0.3"
+git push origin v2.0.3
+```
+
+The tag push runs `.github/workflows/release.yml`: validate the version,
+compile the isolated DKMS sources on Ubuntu 24.04 and Fedora 44/45,
+build the library/verifier and source archive, sign the artifacts,
+verify the signed source archive with the shipped verifier, then publish
+the GitHub Release. A failed validation blocks publication. The release
+keeps the existing source-only format. Local installs, the updater, and
+the optional native package templates use the same complete DKMS tree.
+
+The workflow creates no Git commits and adds no contributor attribution.
+Use a new version/tag for subsequent fixes. A manual rerun must target the
+tag so its signing identity remains compatible with the updater:
+
+```bash
+gh workflow run release.yml --ref v2.0.3 -f tag=v2.0.3
+```
+
 ## Injection (dlopen method)
 
 The recommended injection method uses `dlopen` for full runtime support:
@@ -162,7 +213,7 @@ security/        Security policies
   snakeengine.apparmor     AppArmor profile
   99-snakedrv.rules        udev rules
 
-dkms/            DKMS configuration
+packaging/dkms/  DKMS configuration
 deploy.sh        Build, install, test, inject automation
 sign-module.sh   Secure Boot module signing (MOK)
 ```
@@ -176,6 +227,19 @@ sign-module.sh   Secure Boot module signing (MOK)
 - If Secure Boot blocks loading, sign the module with `./sign-module.sh`
 
 ## Changelog
+
+### 2.0.3 (2026-11-14)
+
+- Fixed Fedora kernel builds by replacing the unavailable `strncpy` call
+  with `strscpy` and including `<linux/string.h>` explicitly.
+- Unified release metadata and DKMS source staging across local installs,
+  the updater and native packages; included the shared kernel ABI headers.
+- Added Ubuntu/Fedora build checks before publication, complete package
+  rendering, and verification of the signed tarball with the shipped verifier.
+- Added updater `--latest`, source/tag consistency checks, and updater
+  self-refresh. Package upgrade hooks preserve the replacement driver.
+- Process-wide hardware breakpoints cover a snapshot of existing threads;
+  data breakpoints report watchpoint events and the accessed address.
 
 ### 2.0.2 (2026-06-04)
 

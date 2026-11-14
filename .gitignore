@@ -1,12 +1,16 @@
-# Build artifacts
+# Build artifacts (kernel + C/C++ — keep narrow so Go's go.mod survives)
 *.o
 *.ko
-*.mod
-*.mod.c
 *.symvers
 *.order
 .*.cmd
+.*.d
 .tmp_versions/
+
+# Kernel-specific *.mod files (don't use bare *.mod — Go's go.mod is
+# legitimate source).
+kernel/*.mod
+kernel/*.mod.c
 
 # Kernel build
 kernel/Module.symvers
@@ -23,12 +27,23 @@ kernel/module-common.o
 # Userland build
 userland/build/
 userland/libsnakedrv.so
+userland/libsnakedrv.a
+userland/*.o
 
-# SELinux build artifacts
+# SELinux build artifacts (source files: .te .fc .if are tracked, .pp is compiled)
 security/tmp/
+security/snakeengine.pp
 
-# Tests (excluded from repo)
+# Tests (excluded from repo — kept local)
 tests/
 
-# Engine (excluded from repo)
+# Engine (lives in its own repo: CyberSnakeH/SnakeEngine)
 Engine/
+Engine.qml-backup/
+
+# Editor / OS noise
+*.swp
+*.swo
+.DS_Store
+.idea/
+.vscode/

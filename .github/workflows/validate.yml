@@ -1,0 +1,59 @@
+name: Validate installation sources
+
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: Source ref to validate
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  installation:
+    name: Installation scripts
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Check shell syntax and staged payload
+        run: |
+          for script in deploy.sh setup.sh packaging/snakedrv-updater scripts/*.sh; do
+              bash -n "$script"
+          done
+          for hook in packaging/nfpm/*.sh; do sh -n "$hook"; done
+          bash scripts/test-installation.sh
+
+  kernel:
+    name: DKMS sources (${{ matrix.image }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: ['ubuntu:24.04', 'fedora:44', 'fedora:45']
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install build dependencies
+        run: |
+          if command -v dnf >/dev/null 2>&1; then
+              dnf install -y gcc make kernel-devel kmod elfutils-libelf-devel git findutils
+          else
+              apt-get update
+              DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                  gcc make linux-headers-generic kmod libelf-dev git ca-certificates
+          fi
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - name: Build the isolated DKMS payload against installed headers
+        shell: bash
+        run: |
+          set -euo pipefail
+          kdir="$(find /usr/src -mindepth 1 -maxdepth 2 -type d \
+              \( -name '*-generic' -o -name '*.x86_64' \) | sort -V | tail -n1)"
+          test -f "$kdir/Makefile"
+          KDIR="$kdir" JOBS=2 bash scripts/test-installation.sh

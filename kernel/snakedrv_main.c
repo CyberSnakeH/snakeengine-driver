@@ -168,7 +168,13 @@ struct bp_slot {
     uint32_t length;
     pid_t tid;
     bool enabled;
+    struct list_head perf_events;
+};
+
+struct bp_perf_event {
+    struct list_head list;
     struct perf_event *perf_bp;
+    pid_t tid;
 };
 
 struct attached_proc {
@@ -239,6 +245,26 @@ static void put_proc(struct attached_proc *p)
     }
 }
 
+static void clear_bp_slot(struct bp_slot *slot)
+{
+    struct bp_perf_event *bpe, *tmp;
+
+    list_for_each_entry_safe(bpe, tmp, &slot->perf_events, list) {
+        list_del(&bpe->list);
+        if (bpe->perf_bp)
+            unregister_hw_breakpoint(bpe->perf_bp);
+        kfree(bpe);
+    }
+
+    slot->used = false;
+    slot->enabled = false;
+    slot->id = 0;
+    slot->address = 0;
+    slot->type = 0;
+    slot->length = 0;
+    slot->tid = 0;
+}
+
 static void cleanup_breakpoints(struct attached_proc *p)
 {
     int i;
@@ -246,12 +272,7 @@ static void cleanup_breakpoints(struct attached_proc *p)
     for (i = 0; i < HBP_NUM; i++) {
         if (!p->bp_slots[i].used)
             continue;
-        
-        if (p->bp_slots[i].perf_bp) {
-            unregister_hw_breakpoint(p->bp_slots[i].perf_bp);
-            p->bp_slots[i].perf_bp = NULL;
-        }
-        p->bp_slots[i].used = false;
+        clear_bp_slot(&p->bp_slots[i]);
     }
 }
 
@@ -474,6 +495,75 @@ static struct task_struct *get_thread_task(struct attached_proc *p, pid_t tid)
     rcu_read_unlock();
 
     return task;
+}
+
+static void put_thread_snapshot(struct task_struct **tasks, unsigned int count)
+{
+    unsigned int i;
+
+    if (!tasks)
+        return;
+
+    for (i = 0; i < count; i++)
+        if (tasks[i])
+            put_task_struct(tasks[i]);
+    kvfree(tasks);
+}
+
+static int collect_process_threads(pid_t pid, struct task_struct ***out_tasks,
+                                   unsigned int *out_count)
+{
+    struct task_struct *leader;
+    struct task_struct *task;
+    struct task_struct **tasks;
+    unsigned int count = 0;
+    unsigned int index = 0;
+
+    *out_tasks = NULL;
+    *out_count = 0;
+
+    rcu_read_lock();
+    leader = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (!leader || leader->tgid != pid) {
+        rcu_read_unlock();
+        return -ESRCH;
+    }
+
+    for_each_thread(leader, task)
+        count++;
+    rcu_read_unlock();
+
+    if (count == 0)
+        return -ESRCH;
+
+    tasks = kvmalloc_array(count, sizeof(*tasks), GFP_KERNEL | __GFP_ZERO);
+    if (!tasks)
+        return -ENOMEM;
+
+    rcu_read_lock();
+    leader = pid_task(find_vpid(pid), PIDTYPE_PID);
+    if (!leader || leader->tgid != pid) {
+        rcu_read_unlock();
+        kvfree(tasks);
+        return -ESRCH;
+    }
+
+    for_each_thread(leader, task) {
+        if (index >= count)
+            break;
+        get_task_struct(task);
+        tasks[index++] = task;
+    }
+    rcu_read_unlock();
+
+    if (index == 0) {
+        kvfree(tasks);
+        return -ESRCH;
+    }
+
+    *out_tasks = tasks;
+    *out_count = index;
+    return 0;
 }
 
 /* ============================================================================
@@ -837,20 +927,28 @@ static void bp_handler(struct perf_event *bp,
     }
 
     for (slot = 0; slot < HBP_NUM; slot++) {
+        struct bp_perf_event *bpe;
+
         if (!p->bp_slots[slot].used)
             continue;
-        if (p->bp_slots[slot].perf_bp == bp) {
-            goto slot_found;
+
+        list_for_each_entry(bpe, &p->bp_slots[slot].perf_events, list) {
+            if (bpe->perf_bp == bp)
+                goto slot_found;
         }
     }
 slot_found:
     if (slot >= HBP_NUM)
         slot = -1;
     
-    entry->event.type = SNAKE_DBG_EVENT_BREAKPOINT;
+    entry->event.type = (slot >= 0 &&
+                         p->bp_slots[slot].type != SNAKE_BP_TYPE_EXEC)
+        ? SNAKE_DBG_EVENT_WATCHPOINT
+        : SNAKE_DBG_EVENT_BREAKPOINT;
     entry->event.pid = pid;
     entry->event.tid = current->pid;
     entry->event.address = regs->ip;
+    entry->event.accessed_address = (slot >= 0) ? p->bp_slots[slot].address : 0;
     entry->event.timestamp = ktime_get_ns();
     entry->event.bp_slot = (slot >= 0) ? slot : 0;
     entry->event.bp_id = (slot >= 0) ? p->bp_slots[slot].id : 0;
@@ -935,11 +1033,38 @@ static int validate_breakpoint_address(struct task_struct *target,
     return ret;
 }
 
+static int register_bp_for_task(struct bp_slot *slot,
+                                struct perf_event_attr *attr,
+                                struct task_struct *target)
+{
+    struct bp_perf_event *bpe;
+    struct perf_event *perf_bp;
+    int ret;
+
+    bpe = kzalloc(sizeof(*bpe), GFP_KERNEL);
+    if (!bpe)
+        return -ENOMEM;
+
+    perf_bp = register_user_hw_breakpoint(attr, bp_handler, NULL, target);
+    if (IS_ERR(perf_bp)) {
+        ret = PTR_ERR(perf_bp);
+        kfree(bpe);
+        return ret;
+    }
+
+    bpe->perf_bp = perf_bp;
+    bpe->tid = target->pid;
+    list_add_tail(&bpe->list, &slot->perf_events);
+    return 0;
+}
+
 static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint *bp)
 {
     struct perf_event_attr attr;
-    struct perf_event *perf_bp;
     struct task_struct *target;
+    struct task_struct **tasks = NULL;
+    unsigned int task_count = 0;
+    unsigned int registered = 0;
     int slot = -1;
     int i;
     int bp_type;
@@ -1023,32 +1148,62 @@ static int do_set_breakpoint(struct attached_proc *p, struct snake_hw_breakpoint
     attr.bp_len = bp_len;
     attr.bp_type = bp_type;
 
-    perf_bp = register_user_hw_breakpoint(&attr, bp_handler, NULL, target);
-    if (IS_ERR(perf_bp)) {
-        ret = PTR_ERR(perf_bp);
-        bp->result = ret;
-        SDRV_ERR("Failed to register BP: %d\n", ret);
-        put_task_struct(target);
-        return ret;
-    }
-
-    p->bp_slots[slot].perf_bp = perf_bp;
     p->bp_slots[slot].used = true;
     p->bp_slots[slot].id = slot + (p->pid << 8);
     p->bp_slots[slot].address = bp->address;
     p->bp_slots[slot].type = bp->type;
-    p->bp_slots[slot].length = bp_len;
+    p->bp_slots[slot].length = bp_len_bytes;
     p->bp_slots[slot].tid = bp->tid;
     p->bp_slots[slot].enabled = true;
+
+    if (bp->tid) {
+        ret = register_bp_for_task(&p->bp_slots[slot], &attr, target);
+        put_task_struct(target);
+        if (ret) {
+            bp->result = ret;
+            clear_bp_slot(&p->bp_slots[slot]);
+            SDRV_ERR("Failed to register BP: %d\n", ret);
+            return ret;
+        }
+        registered = 1;
+    } else {
+        put_task_struct(target);
+        target = NULL;
+
+        ret = collect_process_threads(p->pid, &tasks, &task_count);
+        if (ret) {
+            bp->result = SNAKEDRV_ERROR_NO_PROCESS;
+            clear_bp_slot(&p->bp_slots[slot]);
+            return ret;
+        }
+
+        for (i = 0; i < task_count; i++) {
+            ret = register_bp_for_task(&p->bp_slots[slot], &attr, tasks[i]);
+            if (ret) {
+                bp->result = ret;
+                clear_bp_slot(&p->bp_slots[slot]);
+                put_thread_snapshot(tasks, task_count);
+                SDRV_ERR("Failed to register process-wide BP: %d\n", ret);
+                return ret;
+            }
+            registered++;
+        }
+        put_thread_snapshot(tasks, task_count);
+    }
+
+    if (!registered) {
+        bp->result = SNAKEDRV_ERROR_NO_PROCESS;
+        clear_bp_slot(&p->bp_slots[slot]);
+        return -ESRCH;
+    }
 
     bp->slot = slot;
     bp->id = p->bp_slots[slot].id;
     bp->result = SNAKEDRV_SUCCESS;
 
-    SDRV_INFO("Set BP: pid=%d slot=%d addr=0x%llx\n",
-              p->pid, slot, bp->address);
+    SDRV_INFO("Set BP: pid=%d slot=%d addr=0x%llx threads=%u\n",
+              p->pid, slot, bp->address, registered);
 
-    put_task_struct(target);
     return 0;
 }
 
@@ -1066,25 +1221,7 @@ static int do_clear_breakpoint(struct attached_proc *p, struct snake_hw_breakpoi
 
         return -ENOENT;
 
-    
-
-    if (p->bp_slots[slot].perf_bp) {
-
-        unregister_hw_breakpoint(p->bp_slots[slot].perf_bp);
-
-        p->bp_slots[slot].perf_bp = NULL;
-
-    }
-
-    
-
-    p->bp_slots[slot].used = false;
-
-    p->bp_slots[slot].enabled = false;
-
-    p->bp_slots[slot].length = 0;
-
-    p->bp_slots[slot].tid = 0;
+    clear_bp_slot(&p->bp_slots[slot]);
 
     bp->result = SNAKEDRV_SUCCESS;
 
@@ -1278,6 +1415,8 @@ static long snakedrv_ioctl(struct file *file, unsigned int cmd, unsigned long ar
         p->backend = backend;
         p->owner = file;
         atomic_set(&p->refcount, 1);
+        for (int i = 0; i < HBP_NUM; i++)
+            INIT_LIST_HEAD(&p->bp_slots[i].perf_events);
 
         list_add(&p->list, &attached_list);
         atomic_inc(&attached_count);

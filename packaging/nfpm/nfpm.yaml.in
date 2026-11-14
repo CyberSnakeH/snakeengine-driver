@@ -1,0 +1,109 @@
+# nfpm config for the snakeengine-driver native packages (.deb / .rpm).
+#
+# This file is a TEMPLATE. The release workflow renders it twice:
+#   - once with LIBDIR=/usr/lib/x86_64-linux-gnu, ARCH=amd64 → .deb
+#   - once with LIBDIR=/usr/lib64,                ARCH=x86_64 → .rpm
+#
+# Variables expanded by the workflow:
+#   @SNAKEDRV_VERSION@   release version (from the git tag, e.g. 2.0.0)
+#   @LIBDIR@             absolute libdir for this format
+#   @ARCH@               architecture token expected by the format
+#   @STAGE@              path to the staged tree (where `make install` ran)
+#   @REPO_ROOT@          path to the source checkout (for kernel/, security/)
+
+name: snakeengine-driver
+arch: "@ARCH@"
+platform: linux
+version: "@SNAKEDRV_VERSION@"
+section: kernel
+priority: optional
+maintainer: "CyberSnakeH <maillot6633@gmail.com>"
+description: |
+  SnakeEngine kernel driver — userland library and DKMS-built kernel
+  module providing memory access, hardware breakpoints, debug events,
+  and process injection primitives. Pairs with the SnakeEngine UI
+  (https://github.com/CyberSnakeH/SnakeEngine).
+vendor: SnakeEngine
+homepage: https://github.com/CyberSnakeH/snakeengine-driver
+license: GPL-2.0
+
+depends:
+  - dkms
+  - libc6
+recommends:
+  - "linux-headers-generic | linux-headers"
+
+# RPM-specific dependency translation handled by nfpm via the rpm.depends
+# override below; nfpm's top-level `depends` is .deb-style by default.
+overrides:
+  deb:
+    scripts:
+      postinstall: "@STAGE@/postinstall.sh"
+  rpm:
+    depends:
+      - dkms
+      - glibc
+    recommends:
+      - kernel-devel
+
+# Run after removal hooks from older RPMs and after kernel transactions.
+# Older releases could otherwise unload the replacement in their %preun.
+rpm:
+  scripts:
+    posttrans: "@STAGE@/postinstall.sh"
+
+contents:
+  # ── Userland library + headers + pkg-config + CMake config ──────────
+  # These come from `make install DESTDIR=@STAGE@ PREFIX=/usr LIBDIR=@LIBDIR@`
+  # so they are already at the right paths under @STAGE@.
+  - src: "@STAGE@@LIBDIR@/libsnakedrv.so"
+    dst: "@LIBDIR@/libsnakedrv.so"
+
+  - src: "@STAGE@/usr/include/snakedrv/"
+    dst: "/usr/include/snakedrv/"
+    type: tree
+
+  - src: "@STAGE@@LIBDIR@/pkgconfig/snakedrv.pc"
+    dst: "@LIBDIR@/pkgconfig/snakedrv.pc"
+
+  - src: "@STAGE@@LIBDIR@/cmake/SnakeDrv/"
+    dst: "@LIBDIR@/cmake/SnakeDrv/"
+    type: tree
+
+  # ── Kernel module source (DKMS) ─────────────────────────────────────
+  # The staged tree includes userland/include, required by kernel sources.
+  - src: "@STAGE@/usr/src/snakedrv-@SNAKEDRV_VERSION@/"
+    dst: "/usr/src/snakedrv-@SNAKEDRV_VERSION@/"
+    type: tree
+
+  # ── System integration ──────────────────────────────────────────────
+  - src: "@REPO_ROOT@/security/99-snakedrv.rules"
+    dst: "/etc/udev/rules.d/99-snakedrv.rules"
+
+  - src: "@STAGE@/etc/modprobe.d/snakedrv.conf"
+    dst: "/etc/modprobe.d/snakedrv.conf"
+    type: config|noreplace
+
+  # ── Sigstore verifier (used by snakedrv-updater) ────────────────────
+  - src: "@STAGE@/usr/lib/snakeengine/sigstore-verify"
+    dst: "/usr/lib/snakeengine/sigstore-verify"
+    file_info:
+      mode: 0755
+
+  # ── Updater script (invoked by the SnakeEngine UI via pkexec when
+  # the kernel module's ABI is too old) ───────────────────────────────
+  - src: "@REPO_ROOT@/packaging/snakedrv-updater"
+    dst: "/usr/lib/snakeengine/snakedrv-updater"
+    file_info:
+      mode: 0755
+
+  # ── PolicyKit rule so pkexec snakedrv-updater can prompt the user
+  # graphically without root login. ───────────────────────────────────
+  - src: "@REPO_ROOT@/packaging/polkit/com.snakeengine.driver.policy"
+    dst: "/usr/share/polkit-1/actions/com.snakeengine.driver.policy"
+    file_info:
+      mode: 0644
+
+scripts:
+  preremove:   "@STAGE@/preremove.sh"
+  postremove:  "@STAGE@/postremove.sh"

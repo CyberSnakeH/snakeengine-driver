@@ -4,15 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual re-run hook (e.g. after fixing a workflow bug without
+  # cutting a new tag) — must still target an existing annotated tag.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to release (e.g. v2.0.1)'
+        description: 'Existing tag to release (e.g. v2.1.0)'
         required: true
 
 permissions:
-  contents: write
-  id-token: write
+  contents: write   # gh release create / upload
+  id-token: write   # cosign keyless OIDC
 
 env:
   COSIGN_YES: 'true'
@@ -22,34 +24,44 @@ jobs:
     name: Resolve version metadata
     runs-on: ubuntu-latest
     outputs:
-      version: ${{ steps.version.outputs.version }}
-      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.v.outputs.version }}
+      tag:     ${{ steps.v.outputs.tag }}
     steps:
-      - name: Compute version and tag
-        id: version
-        shell: bash
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - name: Compute version + tag
+        id: v
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          if [ -n "${{ inputs.tag }}" ]; then
-            tag="${{ inputs.tag }}"
-          else
-            tag="${GITHUB_REF#refs/tags/}"
-          fi
-
-          case "$tag" in
-            v[0-9]*.[0-9]*.[0-9]*) ;;
-            *) echo "Release tags must look like vX.Y.Z, got '$tag'" >&2; exit 1 ;;
-          esac
-
-          version="${tag#v}"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          tag="$RELEASE_TAG"
+          # The updater trusts a signing identity under refs/tags/, including
+          # on manual reruns. Checking out a tag alone does not set that identity.
+          test "$GITHUB_REF" = "refs/tags/$tag" || {
+              echo 'Run this workflow on the release tag (--ref vX.Y.Z), not a branch.' >&2
+              exit 1
+          }
+          version="$(bash scripts/version.sh --check-tag "$tag")"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "Releasing $tag"
+          echo "Releasing $tag (version $version)"
+
+  validate:
+    name: Validate release sources
+    needs: metadata
+    uses: ./.github/workflows/validate.yml
+    with:
+      ref: ${{ needs.metadata.outputs.tag }}
 
   release:
     name: Build, sign, and publish source release
     runs-on: ubuntu-22.04
-    needs: metadata
+    needs: [metadata, validate]
+    permissions:
+      contents: write
+      id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,105 +70,111 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: 'stable'
+          go-version-file: tools/sigstore-verify/go.mod
           cache-dependency-path: tools/sigstore-verify/go.sum
 
-      - name: Verify tag matches driver header version
-        shell: bash
+      - name: Install userland build dependencies
         run: |
-          set -euo pipefail
-          version="${{ needs.metadata.outputs.version }}"
-          header="userland/include/snakedrv.h"
-          major="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_MAJOR/{print $3}' "$header")"
-          minor="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_MINOR/{print $3}' "$header")"
-          patch="$(awk '/^[[:space:]]*#define[[:space:]]+SNAKEDRV_VERSION_PATCH/{print $3}' "$header")"
-          header_version="$major.$minor.$patch"
-          if [ "$header_version" != "$version" ]; then
-            echo "Tag version $version does not match header version $header_version" >&2
-            exit 1
-          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends build-essential pkg-config
 
-      - name: Build sigstore verifier
+      - name: Build userland and verifier
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          make -C userland -j"$(nproc)"
+          make -C tools/sigstore-verify VERSION="$VERSION"
+          ./tools/sigstore-verify/sigstore-verify version
+
+      - name: Create source release artifacts
         env:
           VERSION: ${{ needs.metadata.outputs.version }}
         run: |
           set -euo pipefail
-          make -C tools/sigstore-verify VERSION="$VERSION"
-          ./tools/sigstore-verify/sigstore-verify version
-
-      - name: Build userland sanity check
-        run: |
-          set -euo pipefail
-          make -C userland print-version
-          make -C userland -j"$(nproc)"
-
-      - name: Create source tarball
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.metadata.outputs.version }}"
           mkdir -p release
           git archive --format=tar.gz \
-            --prefix="snakeengine-driver-$version/" \
-            -o "release/snakeengine-driver-$version.tar.gz" \
-            HEAD
-          sha256sum "release/snakeengine-driver-$version.tar.gz" \
-            > "release/snakeengine-driver-$version.tar.gz.sha256"
+              --prefix="snakeengine-driver-$VERSION/" \
+              -o "release/snakeengine-driver-$VERSION.tar.gz" HEAD
+          (cd release && sha256sum "snakeengine-driver-$VERSION.tar.gz" \
+              > "snakeengine-driver-$VERSION.tar.gz.sha256")
           install -m 0755 tools/sigstore-verify/sigstore-verify \
-            "release/sigstore-verify-$version-linux-amd64"
+              "release/sigstore-verify-$VERSION-linux-amd64"
 
-      - uses: sigstore/cosign-installer@v3.7.0
+      - uses: sigstore/cosign-installer@v4.1.2
+        with:
+          cosign-release: 'v3.1.4'
 
-      - name: Sign release artifacts with cosign keyless
+      - name: Cosign keyless sign every artifact
         working-directory: release
-        shell: bash
         run: |
-          set -euo pipefail
+          set -eux
           for f in snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64; do
-            cosign sign-blob --new-bundle-format --bundle "${f}.sigstore" "$f"
+              [ -f "$f" ] || continue
+              # Don't sign signature/checksum files themselves.
+              case "$f" in *.sigstore|*.sha256) continue ;; esac
+              cosign sign-blob \
+                  --new-bundle-format \
+                  --bundle "${f}.sigstore" \
+                  "$f"
           done
-          sha256sum snakeengine-driver-*.tar.gz sigstore-verify-*-linux-amd64 \
-            | LC_ALL=C sort > SHA256SUMS
           ls -lh
+
+      - name: Verify signed tarball with the shipped updater verifier
+        env:
+          VERSION: ${{ needs.metadata.outputs.version }}
+        run: |
+          chmod 0755 "release/sigstore-verify-${VERSION}-linux-amd64"
+          "release/sigstore-verify-${VERSION}-linux-amd64" verify-blob \
+              --bundle "release/snakeengine-driver-${VERSION}.tar.gz.sigstore" \
+              --certificate-identity-regexp \
+                  '^https://github\.com/CyberSnakeH/snakeengine-driver/\.github/workflows/release\.yml@refs/tags/v.*$' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              "release/snakeengine-driver-${VERSION}.tar.gz"
+
+      - name: Generate aggregate SHA256SUMS
+        working-directory: release
+        run: |
+          find . -maxdepth 1 -type f \
+              ! -name '*.sigstore' ! -name '*.sha256' ! -name SHA256SUMS \
+              -print0 | LC_ALL=C sort -z | xargs -0 sha256sum > SHA256SUMS
 
       - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.metadata.outputs.tag }}
+          TAG:     ${{ needs.metadata.outputs.tag }}
           VERSION: ${{ needs.metadata.outputs.version }}
-        shell: bash
         run: |
-          set -euo pipefail
-          notes="$(mktemp)"
+          set -eu
+          notes=$(mktemp)
           {
-            git tag -l --format='%(contents)' "$TAG" || true
-            cat <<'EOF'
+              git tag -l --format='%(contents)' "$TAG" || true
+              cat <<'EOF'
 
           ## Verifying release artifacts
 
-          This release publishes the source tarball consumed by
-          `snakedrv-updater`. The tarball and verifier binary are signed
-          with cosign keyless using GitHub OIDC.
+          The source tarball and verifier are signed with **cosign keyless**
+          (Sigstore / Fulcio CA, GitHub OIDC). Each artifact has a companion
+          `<file>.sigstore` bundle. To verify:
 
           ```bash
           cosign verify-blob \
-            --bundle snakeengine-driver-VERSION.tar.gz.sigstore \
-            --certificate-identity-regexp \
-              '^https://github\.com/CyberSnakeH/snakeengine-driver/\.github/workflows/release\.yml@refs/tags/v.*$' \
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-            snakeengine-driver-VERSION.tar.gz
+              --bundle <file>.sigstore \
+              --certificate-identity-regexp \
+                  '^https://github.com/CyberSnakeH/snakeengine-driver/.github/workflows/release.yml@refs/tags/v.*$' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+              <file>
           ```
 
           See `SHA256SUMS` for checksums.
           EOF
-          } | sed "s/VERSION/$VERSION/g" > "$notes"
+          } > "$notes"
 
           if gh release view "$TAG" >/dev/null 2>&1; then
-            gh release upload "$TAG" release/* --clobber
+              gh release upload "$TAG" release/* --clobber
           else
-            gh release create "$TAG" \
-              --title "snakeengine-driver $VERSION" \
-              --notes-file "$notes" \
-              --verify-tag \
-              release/*
+              gh release create "$TAG" \
+                  --title "snakeengine-driver $VERSION" \
+                  --notes-file "$notes" \
+                  --verify-tag \
+                  release/*
           fi
